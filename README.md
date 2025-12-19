@@ -1,6 +1,6 @@
 # 🤖 Kalshi AI Trading Bot
 
-A sophisticated, multi-agent AI-powered trading system for Kalshi prediction markets. This system uses advanced LLM reasoning, portfolio optimization, and real-time market analysis to make intelligent trading decisions.
+A sophisticated, multi-strategy AI-powered trading system for Kalshi prediction markets. This system uses advanced LLM reasoning (Grok-4), portfolio optimization with Kelly Criterion, and real-time market analysis to execute intelligent automated trading.
 
 ## ⚠️ **IMPORTANT DISCLAIMER**
 
@@ -14,49 +14,83 @@ A sophisticated, multi-agent AI-powered trading system for Kalshi prediction mar
 
 The authors are not responsible for any financial losses incurred through the use of this software.
 
+---
+
 ## 🚀 Features
 
-### Core Trading System
-- **Multi-Agent AI Decision Engine**: Uses Forecaster, Critic, and Trader agents for comprehensive market analysis
-- **Real-time Market Scanning**: Continuously monitors Kalshi markets for opportunities
-- **Portfolio Optimization**: Kelly Criterion and risk parity allocation strategies
-- **Live Trading**: Direct integration with Kalshi API for real-time order execution
-- **Performance Analytics**: Comprehensive tracking and analysis of trading performance
+### Multi-Strategy Trading System
+| Strategy | Allocation | Description |
+|----------|------------|-------------|
+| **Market Making** | 30% | Limit orders on both sides for spread profits |
+| **Directional Trading** | 40% | AI-powered directional trades via portfolio optimization |
+| **Quick Flip Scalping** | 30% | Rapid scalping of low-priced contracts (1¢-20¢) |
 
-### Advanced Features
-- **Beast Mode Trading**: Aggressive multi-strategy trading system
-- **Market Making**: Automated spread trading and liquidity provision
-- **Dynamic Exit Strategies**: Intelligent position management and risk control
-- **Cost Optimization**: Smart AI usage to minimize analysis costs
-- **Real-time Dashboard**: Web-based monitoring and control interface
+### Core Capabilities
+- **🧠 Multi-Agent AI Analysis**: Forecaster, Critic, and Trader agents for comprehensive market evaluation
+- **📊 Portfolio Optimization**: Kelly Criterion + Risk Parity allocation with dynamic rebalancing
+- **⚡ Live Trading**: Direct Kalshi API integration for real-time order execution
+- **📈 Real-time Dashboard**: Web-based monitoring with live P&L, positions, and performance metrics
+- **🔄 Position Sync**: Automatic synchronization with Kalshi positions on startup
+
+### Advanced Strategies
+- **Volatility-Adjusted Sizing**: Dynamic position sizing based on market volatility
+- **Theta Decay Exploitation**: Profit from time decay on high-probability events
+- **ML Price Predictions**: Machine learning models for price movement forecasting
+- **Arbitrage Detection**: Spread arbitrage and correlated market opportunities
+- **Trailing Stop Losses**: Automatic profit protection with trailing stops
 
 ### AI Integration
-- **Grok-4 Integration**: Primary AI model for market analysis and decision making
-- **Multi-Model Support**: Fallback to alternative AI models when needed
-- **Confidence Calibration**: AI confidence scoring and validation
-- **News Analysis**: Real-time news integration for market context
+- **Primary Model**: Grok-4 (xAI) for market analysis and decision making
+- **Fallback Model**: Grok-3 for cost optimization
+- **Multi-Model Ensemble**: Consensus-based decisions for high-stakes trades
+- **Cost Controls**: Daily AI budget limits with automatic throttling
+
+---
 
 ## 📊 System Architecture
 
 ```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Market Data   │    │   AI Analysis   │    │   Trade Exec    │
-│   Ingestion     │───▶│   Engine        │───▶│   & Tracking    │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-         │                       │                       │
-         ▼                       ▼                       ▼
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Database      │    │   Portfolio     │    │   Performance   │
-│   Storage       │    │   Optimization  │    │   Analytics     │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        Beast Mode Trading Bot 🚀                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐   │
+│  │   Market    │    │     AI      │    │  Portfolio  │    │   Trade     │   │
+│  │  Ingestion  │───▶│  Analysis   │───▶│Optimization │───▶│  Execution  │   │
+│  │  (ingest)   │    │  (decide)   │    │   (Kelly)   │    │ (execute)   │   │
+│  └─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘   │
+│         │                  │                  │                  │          │
+│         ▼                  ▼                  ▼                  ▼          │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                         SQLite Database                              │    │
+│  │   Markets • Positions • Orders • Performance • AI Analysis Cache    │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│         │                                                      │            │
+│         ▼                                                      ▼            │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐   │
+│  │  Position   │    │ Performance │    │   P&L       │    │   Risk      │   │
+│  │  Tracking   │    │  Scheduler  │    │  Tracker    │    │ Management  │   │
+│  └─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘   │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+                     External APIs
+    ┌─────────────────────────────────────────────┐
+    │  Kalshi API          │       xAI API        │
+    │  • Order execution   │  • Grok-4 analysis   │
+    │  • Market data       │  • Price predictions │
+    │  • Position sync     │  • News sentiment    │
+    └─────────────────────────────────────────────┘
 ```
+
+---
 
 ## 🛠️ Installation
 
 ### Prerequisites
 - Python 3.12+
-- Kalshi API account
-- xAI API key (for Grok-4 access)
+- Kalshi trading account with API access
+- xAI API key (for Grok-4)
 
 ### Setup
 
@@ -78,117 +112,218 @@ The authors are not responsible for any financial losses incurred through the us
    ```
 
 4. **Configure environment variables**
-   Create a `.env` file in the root directory:
+   
+   Copy the template and fill in your credentials:
    ```bash
-   KALSHI_API_KEY=your_kalshi_api_key
-   XAI_API_KEY=your_xai_api_key
+   cp env.template .env
+   ```
+   
+   Edit `.env` with your API keys:
+   ```bash
+   # Kalshi API Configuration
+   KALSHI_API_KEY=your_kalshi_api_key_here
+   
+   # xAI API Configuration (Grok-4)
+   XAI_API_KEY=your_xai_api_key_here
+   
+   # OpenAI API Configuration (fallback)
+   OPENAI_API_KEY=your_openai_api_key_here
+   
+   # Trading Configuration
+   LIVE_TRADING_ENABLED=false  # Set to 'true' for live trading
    ```
 
 5. **Initialize the database**
    ```bash
-   python src/utils/database.py
+   python init_database.py
    ```
+
+---
 
 ## 🚀 Quick Start
 
-### Basic Trading Bot
+### Beast Mode Trading (Recommended)
 ```bash
-# Start the main trading system
+# Start the full trading system with all strategies
+python beast_mode_bot.py --live
+
+# Paper trading mode (default)
 python beast_mode_bot.py
+
+# With real-time dashboard
+python beast_mode_bot.py --live --dashboard
 ```
 
-### Dashboard Interface
+### Dashboard Only
 ```bash
-# Launch the web dashboard
+# Launch the web dashboard to monitor trading
 python launch_dashboard.py
 ```
 
-### Performance Analysis
+### Command Line Options
 ```bash
-# Run performance analysis
-python performance_analysis.py
+python beast_mode_bot.py [OPTIONS]
+
+Options:
+  --live           Enable live trading (real money)
+  --dashboard      Enable real-time web dashboard
+  --help           Show help message
 ```
+
+---
 
 ## 📈 Trading Strategies
 
-### 1. Multi-Agent Decision Making
-The system uses three AI agents:
-- **Forecaster**: Estimates true probability using market data and news
-- **Critic**: Identifies potential flaws or missing context
-- **Trader**: Makes final BUY/SKIP decisions with position sizing
+### 1. Market Making (30% allocation)
+Provides liquidity by placing limit orders on both YES and NO sides:
+- **Dynamic spread calculation** based on volatility and AI edge
+- **Inventory management** to control net exposure
+- **Skew-adjusted sizing** to reduce directional risk
 
-### 2. Portfolio Optimization
-- **Kelly Criterion**: Optimal position sizing based on edge and odds
-- **Risk Parity**: Balanced risk allocation across positions
-- **Dynamic Rebalancing**: Automatic portfolio adjustments
+### 2. Directional Trading (40% allocation)
+AI-powered directional trades using portfolio optimization:
+- **Multi-agent analysis**: Forecaster estimates probability, Critic validates, Trader decides
+- **Kelly Criterion**: Optimal position sizing based on edge and confidence
+- **Risk parity**: Balanced risk allocation across positions
 
-### 3. Market Making
-- **Spread Trading**: Profiting from bid-ask spreads
-- **Liquidity Provision**: Providing market liquidity
-- **Inventory Management**: Risk-controlled position management
+### 3. Quick Flip Scalping (30% allocation)
+Rapid scalping of low-priced contracts:
+- **Entry range**: 1¢ - 20¢ contracts
+- **Immediate sell orders**: Places exit order right after entry
+- **Time-based adjustments**: Reduces target price if not filled
+- **Loss cutting**: Market orders after 30 minutes if unprofitable
+
+### 4. Advanced Strategies
+- **Theta Decay**: Sell high-probability contracts near expiry
+- **Volatility Sizing**: Adjust position size inversely to volatility
+- **ML Predictions**: Use historical patterns for price forecasting
+- **Arbitrage Detection**: Find spread and correlation opportunities
+
+---
 
 ## ⚙️ Configuration
 
-### Trading Parameters
-Key configuration options in `src/config/settings.py`:
+### Key Settings (`src/config/settings.py`)
 
 ```python
-# Position sizing
-max_position_size_pct: float = 5.0
-max_daily_loss_pct: float = 15.0
-max_positions: int = 15
+# Position Sizing
+max_position_size_pct = 3.0    # Max 3% per position
+max_positions = 6               # Max concurrent positions
+kelly_fraction = 0.55           # 55% Kelly for balanced aggression
 
-# Market filtering
-min_volume: float = 200.0
-max_time_to_expiry_days: int = 30
-min_confidence_to_trade: float = 0.50
+# Risk Management
+max_daily_loss_pct = 8.0       # Stop trading at 8% daily loss
+trailing_stop_distance = 0.05  # 5% trailing stop
 
-# AI settings
-primary_model: str = "grok-4"
-ai_temperature: float = 0
-ai_max_tokens: int = 8000
+# AI Configuration
+primary_model = "grok-4"       # Primary AI model
+daily_ai_budget = 12.0         # Daily AI spending limit ($)
+min_confidence = 0.65          # Minimum confidence to trade
+
+# Market Filtering
+min_volume = 750               # Minimum volume threshold
+max_time_to_expiry = 14 days   # Maximum expiry window
 ```
 
-### Risk Management
-- Maximum daily loss limits
-- Position size constraints
-- Correlation and volatility limits
-- Dynamic exit strategies
+### Strategy Allocations
+```python
+market_making_allocation = 0.30   # 30% for market making
+directional_allocation = 0.40    # 40% for directional trades
+quick_flip_allocation = 0.30     # 30% for scalping
+```
 
-## 📊 Performance Monitoring
+---
 
-### Real-time Metrics
-- Total P&L and win rate
-- Sharpe ratio and drawdown analysis
-- AI confidence calibration
-- Cost per trade analysis
+## 📊 Monitoring & Analytics
 
-### Dashboard Features
-- Live trading activity
-- Portfolio overview
-- Performance charts
-- Risk metrics
+### Real-time Dashboard
+Access the web dashboard at `http://localhost:8050`:
+- Live P&L tracking
+- Active positions overview
+- Strategy performance breakdown
 - AI decision logs
+- Risk metrics visualization
+
+### Performance Analysis
+```bash
+# Run comprehensive performance analysis
+python performance_analysis.py
+
+# Quick performance summary
+python quick_performance_analysis.py
+
+# View strategy-specific performance
+python view_strategy_performance.py
+```
+
+### Position Management
+```bash
+# View current positions
+python get_positions.py
+
+# Sync positions with Kalshi
+python sync_positions.py
+
+# Portfolio health check
+python portfolio_health_check.py
+```
+
+---
+
+## 📁 Project Structure
+
+```
+kalshi-ai-trading-bot/
+├── beast_mode_bot.py              # Main entry point
+├── beast_mode_dashboard.py        # Real-time dashboard
+├── trading_dashboard.py           # Detailed trading dashboard
+├── src/
+│   ├── clients/
+│   │   ├── kalshi_client.py       # Kalshi API wrapper
+│   │   ├── xai_client.py          # xAI/Grok client
+│   │   └── openai_client.py       # OpenAI fallback
+│   ├── config/
+│   │   └── settings.py            # Configuration management
+│   ├── jobs/
+│   │   ├── ingest.py              # Market data ingestion
+│   │   ├── decide.py              # AI decision making
+│   │   ├── execute.py             # Order execution
+│   │   ├── track.py               # Position tracking
+│   │   └── evaluate.py            # Performance evaluation
+│   ├── strategies/
+│   │   ├── unified_trading_system.py  # Main strategy orchestrator
+│   │   ├── market_making.py           # Market making strategy
+│   │   ├── portfolio_optimization.py  # Kelly + risk parity
+│   │   ├── quick_flip_scalping.py     # Scalping strategy
+│   │   ├── theta_decay.py             # Time decay strategy
+│   │   ├── volatility_sizing.py       # Vol-adjusted sizing
+│   │   ├── ml_predictions.py          # ML price predictions
+│   │   └── arbitrage_detector.py      # Arbitrage finder
+│   └── utils/
+│       ├── database.py            # SQLite database manager
+│       ├── pnl_tracker.py         # P&L calculation
+│       ├── stop_loss_calculator.py # Trailing stops
+│       └── position_limits.py     # Risk limits
+├── tests/                         # Test suite
+├── logs/                          # Trading logs
+├── requirements.txt               # Python dependencies
+└── env.template                   # Environment template
+```
+
+---
 
 ## 🔧 Development
-
-### Project Structure
-```
-src/
-├── clients/          # API clients (Kalshi, xAI)
-├── config/           # Configuration management
-├── jobs/             # Trading jobs and tasks
-├── strategies/       # Trading strategies
-└── utils/            # Utilities and helpers
-```
 
 ### Testing
 ```bash
 # Run all tests
 python run_tests.py
 
-# Run specific test
-pytest tests/test_decide.py
+# Run specific test file
+pytest tests/test_decide.py -v
+
+# Run with coverage
+pytest --cov=src tests/
 ```
 
 ### Code Quality
@@ -201,48 +336,40 @@ isort src/
 mypy src/
 ```
 
+---
+
 ## ⚠️ Important Notes
 
-### Risk Disclaimer
+### Risk Warnings
 - This is experimental software for educational purposes
 - Trading involves substantial risk of loss
 - Only trade with capital you can afford to lose
 - Past performance does not guarantee future results
 
-### API Limits
-- Respect Kalshi API rate limits
-- Monitor xAI API usage and costs
-- Implement proper error handling
+### API Rate Limits
+- Kalshi: ~10 requests/second
+- xAI: Monitor daily token usage
+- Implement proper error handling and backoff
 
-### Security
+### Security Best Practices
 - Never commit API keys or private keys
-- Use environment variables for sensitive data
+- Use environment variables for all secrets
 - Regularly rotate API credentials
+- Keep your Kalshi private key secure
 
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+---
 
 ## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
+---
+
 ## 🙏 Acknowledgments
 
-- Kalshi for providing the prediction market platform
-- xAI for the Grok-4 AI model
-- The open-source community for various libraries and tools
-
-## 📞 Support
-
-For questions, issues, or contributions:
-- Open an issue on GitHub
-- Check the documentation in the `docs/` folder
-- Review the test files for usage examples
+- [Kalshi](https://kalshi.com) for the prediction market platform
+- [xAI](https://x.ai) for the Grok-4 AI model
+- The open-source community for essential libraries
 
 ---
 

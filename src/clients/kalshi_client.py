@@ -313,25 +313,52 @@ class KalshiClient(TradingLoggerMixin):
         limit: int = 100
     ) -> Dict[str, Any]:
         """
-        Get market price history.
+        Get market price history using candlesticks API.
         
         Args:
-            ticker: Market ticker
-            start_ts: Start timestamp
-            end_ts: End timestamp
-            limit: Number of records to return
+            ticker: Market ticker (format: SERIES-EVENTID-MARKETID)
+            start_ts: Start timestamp (in seconds) - required
+            end_ts: End timestamp (in seconds) - required
+            limit: Number of records to return (unused, kept for compatibility)
         
         Returns:
-            Price history data
+            Price history/candlestick data
         """
-        params = {"limit": limit}
-        if start_ts:
-            params["start_ts"] = start_ts
-        if end_ts:
-            params["end_ts"] = end_ts
+        import time as time_module
         
+        # Extract series ticker from the full ticker (e.g., KXNBATOTAL from KXNBATOTAL-25DEC19OKCMIN-226)
+        series_ticker = ticker.split('-')[0] if '-' in ticker else ticker
+        
+        # Default to last 7 days if not specified
+        if end_ts is None:
+            end_ts = int(time_module.time())
+        if start_ts is None:
+            start_ts = end_ts - (7 * 24 * 60 * 60)  # 7 days ago
+        
+        params = {
+            "start_ts": start_ts,
+            "end_ts": end_ts,
+            "period_interval": 60  # 1-hour candlesticks
+        }
+        
+        # Correct endpoint: /series/{series_ticker}/markets/{ticker}/candlesticks
         return await self._make_authenticated_request(
-            "GET", f"/trade-api/v2/markets/{ticker}/history", params=params, require_auth=False
+            "GET", f"/trade-api/v2/series/{series_ticker}/markets/{ticker}/candlesticks", 
+            params=params, require_auth=False
+        )
+    
+    async def get_order(self, order_id: str) -> Dict[str, Any]:
+        """
+        Get order details by order ID.
+        
+        Args:
+            order_id: The order ID to retrieve
+        
+        Returns:
+            Order details including status
+        """
+        return await self._make_authenticated_request(
+            "GET", f"/trade-api/v2/portfolio/orders/{order_id}"
         )
     
     async def place_order(
@@ -344,7 +371,8 @@ class KalshiClient(TradingLoggerMixin):
         type_: str = "market",
         yes_price: Optional[int] = None,
         no_price: Optional[int] = None,
-        expiration_ts: Optional[int] = None
+        expiration_ts: Optional[int] = None,
+        time_in_force: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Place a trading order.
@@ -359,10 +387,19 @@ class KalshiClient(TradingLoggerMixin):
             yes_price: Yes price in cents (for limit orders)
             no_price: No price in cents (for limit orders)
             expiration_ts: Order expiration timestamp
+            time_in_force: Order time in force ("gtc" = good til cancelled, "ioc" = immediate or cancel)
         
         Returns:
             Order response
         """
+        # 🚨 CRITICAL: Validate ticker before sending to API
+        if not ticker or not ticker.strip():
+            raise KalshiAPIError("Invalid ticker: ticker cannot be empty")
+        if len(ticker) < 5:
+            raise KalshiAPIError(f"Invalid ticker: {ticker} is too short")
+        if ticker.startswith("KXMV"):
+            raise KalshiAPIError(f"Invalid market type: {ticker} (KXMV combo/multi-variant markets not supported)")
+        
         order_data = {
             "ticker": ticker,
             "client_order_id": client_order_id,
@@ -378,6 +415,11 @@ class KalshiClient(TradingLoggerMixin):
             order_data["no_price"] = no_price
         if expiration_ts:
             order_data["expiration_ts"] = expiration_ts
+        if time_in_force:
+            # IOC orders must not have expiration_ts
+            if time_in_force == "ioc" and expiration_ts:
+                del order_data["expiration_ts"]
+            order_data["time_in_force"] = time_in_force
         
         return await self._make_authenticated_request(
             "POST", "/trade-api/v2/portfolio/orders", json_data=order_data

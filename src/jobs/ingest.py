@@ -27,6 +27,10 @@ async def process_and_queue_markets(
     """
     markets_to_upsert = []
     for market_data in markets_data:
+        # Skip unsupported market types (Multi-Variant/Parlays)
+        if market_data["ticker"].startswith("KXMV") or "PARLAY" in market_data.get("title", "").upper():
+            continue
+
         # A simple approach is to take the average of bid and ask.
         yes_price = (market_data.get("yes_bid", 0) + market_data.get("yes_ask", 0)) / 2
         no_price = (market_data.get("no_bid", 0) + market_data.get("no_ask", 0)) / 2
@@ -57,32 +61,30 @@ async def process_and_queue_markets(
         await db_manager.upsert_markets(markets_to_upsert)
         logger.info(f"Successfully upserted {len(markets_to_upsert)} markets.")
 
-        # Primary filtering criteria - MORE PERMISSIVE FOR MORE OPPORTUNITIES!
-        min_volume: float = 100.0  # DECREASED: Much lower volume threshold (was 100, keeping low)
-        min_volume_for_ai_analysis: float = 150.0  # DECREASED: Lower volume for AI analysis (was 200, now 150)  
-        preferred_categories: List[str] = []  # Empty = all categories allowed
-        excluded_categories: List[str] = []  # Empty = no categories excluded
+        # 🎯 CATEGORY-SPECIFIC PARAMETERS
+        from src.strategies.category_handlers import get_category_handler
+        category_handler = get_category_handler()
 
-        # Enhanced filtering for better opportunities - MORE PERMISSIVE FOR MORE TRADES
-        min_price_movement: float = 0.015  # DECREASED: Even lower minimum range (was 0.02, now 1.5¢)
-        max_bid_ask_spread: float = 0.20   # INCREASED: Allow even wider spreads (was 0.15, now 20¢)
-        min_confidence_for_long_term: float = 0.40  # DECREASED: Lower confidence required (was 0.5, now 40%)
-
-        eligible_markets = [
-            m
-            for m in markets_to_upsert
-            if m.volume >= min_volume
-            # REMOVED TIME RESTRICTION - we can now trade markets with ANY deadline!
-            # Dynamic exit strategies will handle timing automatically
-            and (
-                not settings.trading.preferred_categories
-                or m.category in settings.trading.preferred_categories
-            )
-            and m.category not in settings.trading.excluded_categories
-        ]
+        # Primary filtering criteria
+        min_volume: float = 100.0  # Baseline
+        
+        eligible_markets = []
+        for m in markets_to_upsert:
+            # Get category-specific configuration
+            config = category_handler.get_category_config(m.category)
+            
+            # Adjust volume threshold based on category position size multiplier
+            # Smaller positions (riskier categories) need higher volume for safety
+            adjusted_min_volume = min_volume / config.position_size_multiplier if config.position_size_multiplier > 0 else min_volume
+            
+            if m.volume >= adjusted_min_volume:
+                # Check category filters from settings
+                if (not settings.trading.preferred_categories or m.category in settings.trading.preferred_categories) and \
+                   (m.category not in settings.trading.excluded_categories):
+                    eligible_markets.append(m)
 
         logger.info(
-            f"Found {len(eligible_markets)} eligible markets to process in this batch."
+            f"Found {len(eligible_markets)} eligible markets to process in this batch (using category-specific thresholds)."
         )
         for market in eligible_markets:
             await queue.put(market)

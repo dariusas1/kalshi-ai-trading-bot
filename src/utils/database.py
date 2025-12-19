@@ -44,6 +44,7 @@ class Position:
     take_profit_price: Optional[float] = None
     max_hold_hours: Optional[int] = None  # Maximum hours to hold position
     target_confidence_change: Optional[float] = None  # Exit if confidence drops by this amount
+    trailing_stop_price: Optional[float] = None  # Price for trailing stop loss
 
 @dataclass
 class TradeLog:
@@ -248,6 +249,7 @@ class DatabaseManager(TradingLoggerMixin):
                 take_profit_price REAL,
                 max_hold_hours INTEGER,
                 target_confidence_change REAL,
+                trailing_stop_price REAL,
                 UNIQUE(market_id, side)
             )
         """)
@@ -319,6 +321,23 @@ class DatabaseManager(TradingLoggerMixin):
             )
         """)
 
+        # Add kalshi_fills table for historical tracking
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS kalshi_fills (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                fill_id TEXT UNIQUE,
+                ticker TEXT,
+                side TEXT,
+                action TEXT,
+                count INTEGER,
+                yes_price INTEGER,
+                no_price INTEGER,
+                created_time TEXT,
+                order_id TEXT,
+                synced_at TEXT
+            )
+        """)
+
         # Create indices for performance
         await db.execute("CREATE INDEX IF NOT EXISTS idx_market_analyses_market_id ON market_analyses(market_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_market_analyses_timestamp ON market_analyses(analysis_timestamp)")
@@ -353,6 +372,10 @@ class DatabaseManager(TradingLoggerMixin):
             if 'target_confidence_change' not in column_names:
                 await db.execute("ALTER TABLE positions ADD COLUMN target_confidence_change REAL")
                 self.logger.info("Added target_confidence_change column to positions table")
+                
+            if 'trailing_stop_price' not in column_names:
+                await db.execute("ALTER TABLE positions ADD COLUMN trailing_stop_price REAL")
+                self.logger.info("Added trailing_stop_price column to positions table")
                 
             await db.commit()
             
@@ -504,6 +527,15 @@ class DatabaseManager(TradingLoggerMixin):
             """, (status, position_id))
             await db.commit()
             self.logger.info(f"Updated position {position_id} status to {status}.")
+
+    async def close_position(self, position_id: int):
+        """
+        Mark a position as closed.
+        
+        Args:
+            position_id: The id of the position to close.
+        """
+        await self.update_position_status(position_id, 'closed')
 
     async def get_position_by_market_id(self, market_id: str) -> Optional[Position]:
         """
@@ -926,6 +958,23 @@ class DatabaseManager(TradingLoggerMixin):
             await db.commit()
         self.logger.info(f"Updated position {position_id} to live.")
 
+    async def update_trailing_stop_price(self, position_id: int, trailing_stop_price: float):
+        """
+        Updates the trailing stop price for a position.
+
+        Args:
+            position_id: The ID of the position to update.
+            trailing_stop_price: The new trailing stop price.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                UPDATE positions 
+                SET trailing_stop_price = ?
+                WHERE id = ?
+            """, (trailing_stop_price, position_id))
+            await db.commit()
+        self.logger.info(f"Updated position {position_id} trailing stop to {trailing_stop_price:.4f}.")
+
     async def add_position(self, position: Position) -> Optional[int]:
         """
         Adds a new position to the database, if one doesn't already exist for the same market and side.
@@ -947,8 +996,8 @@ class DatabaseManager(TradingLoggerMixin):
             position_dict['timestamp'] = position.timestamp.isoformat()
 
             cursor = await db.execute("""
-                INSERT INTO positions (market_id, side, entry_price, quantity, timestamp, rationale, confidence, live, status, strategy, stop_loss_price, take_profit_price, max_hold_hours, target_confidence_change)
-                VALUES (:market_id, :side, :entry_price, :quantity, :timestamp, :rationale, :confidence, :live, :status, :strategy, :stop_loss_price, :take_profit_price, :max_hold_hours, :target_confidence_change)
+                INSERT INTO positions (market_id, side, entry_price, quantity, timestamp, rationale, confidence, live, status, strategy, stop_loss_price, take_profit_price, max_hold_hours, target_confidence_change, trailing_stop_price)
+                VALUES (:market_id, :side, :entry_price, :quantity, :timestamp, :rationale, :confidence, :live, :status, :strategy, :stop_loss_price, :take_profit_price, :max_hold_hours, :target_confidence_change, :trailing_stop_price)
             """, position_dict)
             await db.commit()
             
@@ -984,8 +1033,62 @@ class DatabaseManager(TradingLoggerMixin):
                     stop_loss_price=row[10],
                     take_profit_price=row[11],
                     max_hold_hours=row[12],
-                    target_confidence_change=row[13]
+                    target_confidence_change=row[13],
+                    trailing_stop_price=row[14]
                 )
                 positions.append(position)
             
             return positions
+    
+    async def sync_with_kalshi(self, kalshi_client) -> Dict[str, int]:
+        """
+        Sync local database with actual Kalshi positions.
+        
+        - Closes stale local positions that don't exist on Kalshi
+        - Logs discrepancies for debugging
+        
+        Args:
+            kalshi_client: KalshiClient instance for API calls
+            
+        Returns:
+            Dict with sync statistics
+        """
+        try:
+            # Get positions from Kalshi
+            response = await kalshi_client.get_positions()
+            kalshi_positions = response.get('market_positions', [])
+            
+            # Build set of active Kalshi positions (tickers with non-zero quantity)
+            kalshi_active = set()
+            for pos in kalshi_positions:
+                ticker = pos.get('ticker', '')
+                position_qty = pos.get('position', 0)
+                if abs(position_qty) > 0:
+                    kalshi_active.add(ticker)
+            
+            # Get local open positions
+            local_positions = await self.get_open_positions()
+            
+            stale_closed = 0
+            for pos in local_positions:
+                if pos.market_id not in kalshi_active:
+                    # This local position doesn't exist on Kalshi - close it
+                    await self.update_position_status(pos.id, 'closed')
+                    self.logger.info(f"🧹 Closed stale position: {pos.market_id}")
+                    stale_closed += 1
+            
+            # Log sync summary
+            self.logger.info(
+                f"🔄 Kalshi sync complete: {len(kalshi_active)} active Kalshi positions, "
+                f"{len(local_positions)} local positions, {stale_closed} stale closed"
+            )
+            
+            return {
+                'kalshi_positions': len(kalshi_active),
+                'local_positions': len(local_positions),
+                'stale_closed': stale_closed
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error syncing with Kalshi: {e}")
+            return {'error': str(e)}

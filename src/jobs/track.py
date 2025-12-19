@@ -62,17 +62,33 @@ async def should_exit_position(
                 side=position.side
             )
             return True, f"stop_loss_triggered_pnl_{expected_pnl:.2f}", current_price
+            
+    # 2.1 Trailing Stop Loss
+    if position.trailing_stop_price:
+        trailing_triggered = False
+        if position.side == "YES":
+            trailing_triggered = current_price <= position.trailing_stop_price
+        else:
+            trailing_triggered = current_price >= position.trailing_stop_price
+            
+        if trailing_triggered:
+            return True, f"trailing_stop_triggered_at_{position.trailing_stop_price:.3f}", current_price
     
     # 3. Take-profit exit (enhanced logic for YES/NO)
     if position.take_profit_price:
         take_profit_triggered = False
         
+        # 🚨 SANITY CHECK: Only trigger take profit if we're actually in profit
+        # Calculate if this would be a profitable exit
         if position.side == "YES":
+            pnl = (current_price - position.entry_price) * position.quantity
             # For YES positions, take profit when price rises above target
-            take_profit_triggered = current_price >= position.take_profit_price
+            take_profit_triggered = current_price >= position.take_profit_price and pnl > 0
         else:
-            # For NO positions, take profit when price falls below target
-            take_profit_triggered = current_price <= position.take_profit_price
+            pnl = (position.entry_price - current_price) * position.quantity  
+            # For NO positions, take profit when we're in profit
+            # NO profits when yes_price drops, meaning our no_price rises
+            take_profit_triggered = current_price <= position.take_profit_price and pnl > 0
             
         if take_profit_triggered:
             return True, "take_profit", current_price
@@ -108,6 +124,50 @@ async def should_exit_position(
     # Could be implemented as a separate, less frequent job
     
     return False, "", current_price
+
+async def update_trailing_stop(
+    position: Position, 
+    current_price: float, 
+    db_manager: DatabaseManager
+) -> Optional[float]:
+    """
+    Calculate and update trailing stop price if market moves in our favor.
+    """
+    if not getattr(settings.trading, 'trailing_stop_enabled', False):
+        return None
+    
+    # 🚨 SAFEGUARD: Reject invalid prices (0 or near-zero) to prevent bad trailing stops
+    if current_price <= 0.01:  # 1 cent minimum
+        return None
+        
+    distance = getattr(settings.trading, 'trailing_stop_distance_pct', 0.05)
+    activation = getattr(settings.trading, 'trailing_stop_activation_pct', 0.03)
+    
+    # Calculate profit percentage
+    if position.side == "YES":
+        profit_pct = (current_price - position.entry_price) / position.entry_price
+    else:
+        profit_pct = (position.entry_price - current_price) / position.entry_price
+        
+    # Only activate or update if we've reached the activation threshold
+    if profit_pct < activation:
+        return None
+        
+    # Calculate new potential trailing stop
+    if position.side == "YES":
+        new_trailing = current_price * (1 - distance)
+        # Only move stop UP
+        if position.trailing_stop_price is None or new_trailing > position.trailing_stop_price:
+            await db_manager.update_trailing_stop_price(position.id, new_trailing)
+            return new_trailing
+    else:
+        new_trailing = current_price * (1 + distance)
+        # Only move stop DOWN
+        if position.trailing_stop_price is None or new_trailing < position.trailing_stop_price:
+            await db_manager.update_trailing_stop_price(position.id, new_trailing)
+            return new_trailing
+            
+    return None
 
 async def calculate_dynamic_exit_levels(position: Position) -> dict:
     """Calculate smart exit levels using Grok4 recommendations."""
@@ -176,6 +236,12 @@ async def run_tracking(db_manager: Optional[DatabaseManager] = None):
         exits_executed = 0
         for position in open_positions:
             try:
+                # 🚨 CRITICAL: Skip KXMV combo markets (shouldn't exist but safety check)
+                if position.market_id.startswith("KXMV"):
+                    logger.warning(f"⚠️ Found KXMV position {position.market_id} - marking as cancelled")
+                    await db_manager.update_position_status(position.id, 'cancelled')
+                    continue
+                
                 # Get current market data
                 market_response = await kalshi_client.get_market(position.market_id)
                 market_data = market_response.get('market', {})
@@ -184,11 +250,18 @@ async def run_tracking(db_manager: Optional[DatabaseManager] = None):
                     logger.warning(f"Could not retrieve market data for {position.market_id}. Skipping.")
                     continue
 
+
                 # Get current prices
                 current_yes_price = market_data.get('yes_price', 0) / 100  # Convert cents to dollars
                 current_no_price = market_data.get('no_price', 0) / 100
                 market_status = market_data.get('status', 'unknown')
                 market_result = market_data.get('result')  # Market resolution result
+                
+                # 🚨 SAFEGUARD: Skip markets with 0 prices - likely API issues or closed markets
+                # Only allow 0 price for market resolution (where result is known)
+                if current_yes_price == 0 and current_no_price == 0 and market_status != 'closed':
+                    logger.warning(f"⚠️ Skipping {position.market_id} - API returned 0 prices (status: {market_status})")
+                    continue
                 
                 # If position doesn't have exit strategy set, calculate defaults
                 if not position.stop_loss_price and not position.take_profit_price:
@@ -201,6 +274,12 @@ async def run_tracking(db_manager: Optional[DatabaseManager] = None):
                     position.take_profit_price = exit_levels["take_profit_price"] 
                     position.max_hold_hours = exit_levels["max_hold_hours"]
                     position.target_confidence_change = exit_levels["target_confidence_change"]
+
+                # Update trailing stop price if needed
+                new_trailing = await update_trailing_stop(position, current_yes_price if position.side == "YES" else current_no_price, db_manager)
+                if new_trailing:
+                    position.trailing_stop_price = new_trailing
+                    logger.info(f"🚀 Trailing stop UPDATED for {position.market_id}: {new_trailing:.3f}")
 
                 # Check if position should be exited (market resolution, time-based, etc.)
                 should_exit, exit_reason, exit_price = await should_exit_position(

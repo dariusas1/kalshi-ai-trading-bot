@@ -97,7 +97,7 @@ class AutomatedPerformanceAnalyzer:
     async def initialize(self):
         """Initialize clients and database connections."""
         self.kalshi_client = KalshiClient()
-        self.xai_client = XAIClient()
+        self.xai_client = XAIClient(kalshi_client=self.kalshi_client)
         self.db = DatabaseManager()
         await self.db.initialize()
         self.logger.info("Automated Performance Analyzer initialized")

@@ -60,20 +60,21 @@ async def run_trading_job() -> Optional[TradingSystemResults]:
         # Initialize clients
         db_manager = DatabaseManager()
         kalshi_client = KalshiClient()
-        xai_client = XAIClient(db_manager=db_manager)  # Pass db_manager for LLM logging
+        xai_client = XAIClient(db_manager=db_manager, kalshi_client=kalshi_client)  # Pass db_manager for LLM logging, kalshi_client for ML predictions
         
         # Configure the unified system
-        # Use default settings unless overridden
+        # Use settings from TradingConfig
         config = TradingSystemConfig(
-            # Capital allocation (can be adjusted based on market conditions)
-            market_making_allocation=getattr(settings.trading, 'market_making_allocation', 0.40),
-            directional_trading_allocation=getattr(settings.trading, 'directional_allocation', 0.50),
-            arbitrage_allocation=getattr(settings.trading, 'arbitrage_allocation', 0.10),
+            # Capital allocation from settings
+            market_making_allocation=settings.trading.market_making_allocation,
+            directional_trading_allocation=settings.trading.directional_allocation,
+            quick_flip_allocation=settings.trading.quick_flip_allocation,
+            arbitrage_allocation=settings.trading.arbitrage_allocation,
             
             # Risk management
             max_portfolio_volatility=getattr(settings.trading, 'max_volatility', 0.20),
             max_correlation_exposure=getattr(settings.trading, 'max_correlation', 0.70),
-            max_single_position=getattr(settings.trading, 'max_single_position', 0.15),
+            max_single_position=settings.trading.max_single_position,
             
             # Performance targets
             target_sharpe_ratio=getattr(settings.trading, 'target_sharpe', 2.0),
@@ -136,7 +137,7 @@ async def _fallback_legacy_trading() -> Optional[TradingSystemResults]:
         # Initialize components
         db_manager = DatabaseManager()
         kalshi_client = KalshiClient()
-        xai_client = XAIClient()
+        xai_client = XAIClient(kalshi_client=kalshi_client)
         
         # Get eligible markets
         markets = await db_manager.get_eligible_markets(
@@ -159,8 +160,15 @@ async def _fallback_legacy_trading() -> Optional[TradingSystemResults]:
                 )
                 
                 if position:
-                    # Execute position
-                    success = await execute_position(position, kalshi_client, db_manager)
+                    # Execute position with correct argument order
+                    live_mode = getattr(settings.trading, 'live_trading_enabled', False)
+                    success = await execute_position(
+                        position=position, 
+                        live_mode=live_mode, 
+                        db_manager=db_manager, 
+                        kalshi_client=kalshi_client,
+                        edge=getattr(position, 'confidence', 0.0) - getattr(market, 'yes_price', 0.5)  # Calculate edge
+                    )
                     if success:
                         positions_created += 1
                         total_exposure += position.entry_price * position.quantity

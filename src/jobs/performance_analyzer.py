@@ -374,7 +374,7 @@ async def run_performance_analysis(
         kalshi_client = KalshiClient()
     
     if xai_client is None:
-        xai_client = XAIClient()
+        xai_client = XAIClient(kalshi_client=kalshi_client)
     
     try:
         analyzer = TradingPerformanceAnalyzer(db_manager, kalshi_client, xai_client)

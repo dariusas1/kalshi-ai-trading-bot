@@ -102,6 +102,11 @@ class BeastModeBot:
             kalshi_client = KalshiClient()
             xai_client = XAIClient(db_manager=db_manager)  # Pass db_manager for LLM logging
             
+            # 🔄 Sync with Kalshi on startup to ensure accurate position data
+            self.logger.info("🔄 Syncing positions with Kalshi...")
+            sync_result = await db_manager.sync_with_kalshi(kalshi_client)
+            self.logger.info(f"✅ Kalshi sync complete: {sync_result}")
+            
             # Small delay to ensure everything is ready
             await asyncio.sleep(1)
             
@@ -266,8 +271,15 @@ class BeastModeBot:
 
     async def _run_position_tracking(self, db_manager: DatabaseManager, kalshi_client: KalshiClient):
         """Background task for position tracking and exit strategies."""
+        sync_counter = 0
         while not self.shutdown_event.is_set():
             try:
+                # Sync with Kalshi every 5 cycles (10 minutes) to keep positions accurate
+                sync_counter += 1
+                if sync_counter >= 5:
+                    await db_manager.sync_with_kalshi(kalshi_client)
+                    sync_counter = 0
+                
                 # ✅ FIXED: Pass the shared database manager
                 await run_tracking(db_manager)
                 await asyncio.sleep(120)  # Check positions every 2 minutes (slower to reduce API load)
@@ -304,11 +316,12 @@ Examples:
   python beast_mode_bot.py --live       # Live trading mode  
   python beast_mode_bot.py --dashboard  # Live dashboard mode
   python beast_mode_bot.py --live --log-level DEBUG  # Live mode with debug logs
+  python beast_mode_bot.py --live --no-market-making  # Live without market making
 
 Beast Mode Features:
-  • Market Making (40% allocation) - Profit from spreads
-  • Directional Trading (50% allocation) - AI predictions with portfolio optimization
-  • Arbitrage Detection (10% allocation) - Cross-market opportunities
+  • Market Making (30% allocation) - Profit from spreads
+  • Directional Trading (40% allocation) - AI predictions with portfolio optimization
+  • Quick Flip Scalping (30% allocation) - Rapid low-price contract trading
   • No time restrictions - Trade any deadline with dynamic exits
   • Kelly Criterion portfolio optimization
   • Real-time risk management and rebalancing
@@ -334,10 +347,43 @@ Beast Mode Features:
         help="Set the logging level (default: INFO)"
     )
     
+    # Strategy control arguments
+    parser.add_argument(
+        "--no-market-making",
+        action="store_true",
+        help="Disable market making strategy"
+    )
+    parser.add_argument(
+        "--no-quick-flip",
+        action="store_true",
+        help="Disable quick flip scalping strategy"
+    )
+    parser.add_argument(
+        "--directional-only",
+        action="store_true",
+        help="Run only directional trading strategy (disables market making and quick flip)"
+    )
+    
     args = parser.parse_args()
     
     # Setup logging
     setup_logging(log_level=args.log_level)
+    
+    # Apply strategy overrides from CLI
+    from src.config import settings as settings_module
+    if args.no_market_making or args.directional_only:
+        settings_module.enable_market_making = False
+        print("📊 Market making: DISABLED")
+    else:
+        print(f"📊 Market making: ENABLED ({settings.trading.market_making_allocation:.0%})")
+    
+    if args.no_quick_flip or args.directional_only:
+        settings.trading.quick_flip_allocation = 0.0
+        print("⚡ Quick flip: DISABLED")
+    else:
+        print(f"⚡ Quick flip: ENABLED ({settings.trading.quick_flip_allocation:.0%})")
+    
+    print(f"🎯 Directional trading: ENABLED ({settings.trading.directional_allocation:.0%})")
     
     # Warn about live mode
     if args.live and not args.dashboard:

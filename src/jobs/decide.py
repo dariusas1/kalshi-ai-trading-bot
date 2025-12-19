@@ -157,6 +157,10 @@ async def make_decision_for_market(
                         # Calculate exit strategy using Grok4 recommendations  
                         from src.utils.stop_loss_calculator import StopLossCalculator
                         
+                        # 🎯 CATEGORY-SPECIFIC PARAMETERS
+                        from src.strategies.category_handlers import get_category_config
+                        category_config = get_category_config(market.category)
+                        
                         exit_strategy = StopLossCalculator.calculate_stop_loss_levels(
                             entry_price=market.yes_price,
                             side=decision.side,
@@ -165,13 +169,20 @@ async def make_decision_for_market(
                             time_to_expiry_days=get_time_to_expiry_days(market)
                         )
                         
+                        # Apply category-specific overrides
+                        if category_config.max_hold_hours != 24:  # Non-default
+                            exit_strategy['max_hold_hours'] = min(
+                                exit_strategy['max_hold_hours'], 
+                                category_config.max_hold_hours
+                            )
+                        
                         position = Position(
                             market_id=market.market_id,
                             side=decision.side,
                             entry_price=market.yes_price,
                             quantity=quantity,
                             timestamp=datetime.now(),
-                            rationale="High-confidence near-expiry YES bet.",
+                            rationale=f"High-confidence near-expiry YES bet. Category: {market.category}",
                             confidence=decision.confidence,
                             live=False,
                             strategy="directional_trading",
@@ -232,11 +243,25 @@ async def make_decision_for_market(
             )
             return None
         
-        decision = await xai_client.get_trading_decision(
-            market_data=market_data,
-            portfolio_data=portfolio_data,
-            news_summary=news_summary,
-        )
+        # Use multi-model ensemble for high-stakes trades if enabled
+        # Define high-stakes as potential investment > $50 (approx 5000 cents)
+        max_investment_possible = (available_balance * settings.trading.max_position_size_pct) / 100
+        is_high_stakes = max_investment_possible >= 50.0
+        
+        if settings.multi_model_ensemble and is_high_stakes:
+            logger.info(f"Using multi-model ensemble for high-stakes market (max potential: ${max_investment_possible:.2f})")
+            decision = await xai_client.get_ensemble_decision(
+                market_data=market_data,
+                portfolio_data=portfolio_data,
+                news_summary=news_summary,
+                min_consensus_confidence=0.65  # Slightly stricter for high-stakes
+            )
+        else:
+            decision = await xai_client.get_trading_decision(
+                market_data=market_data,
+                portfolio_data=portfolio_data,
+                news_summary=news_summary,
+            )
 
         # Estimate decision cost (this should come from the XAI client in the future)
         estimated_decision_cost = 0.015  # Rough estimate

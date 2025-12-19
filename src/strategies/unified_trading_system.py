@@ -49,6 +49,7 @@ from src.strategies.quick_flip_scalping import (
     run_quick_flip_strategy,
     QuickFlipConfig
 )
+from src.strategies.theta_decay import run_theta_decay_strategy
 
 
 @dataclass
@@ -99,6 +100,11 @@ class TradingSystemResults:
     max_portfolio_drawdown: float = 0.0
     correlation_score: float = 0.0
     diversification_ratio: float = 0.0
+    
+    # Theta decay metrics
+    theta_trades: int = 0
+    theta_exposure: float = 0.0
+    theta_expected_profit: float = 0.0
     
     # Performance
     total_positions: int = 0
@@ -198,7 +204,32 @@ class UnifiedAdvancedTradingSystem:
             self.logger.error(f"Failed to get portfolio value, using default: {e}")
             self.total_capital = 100  # Conservative fallback
         
-        # Update capital allocation based on actual balance
+        # 🎯 DYNAMIC ALLOCATION: Use performance-based allocation instead of static split
+        try:
+            from src.utils.dynamic_allocation import get_dynamic_strategy_allocation
+            
+            dynamic_allocation = await get_dynamic_strategy_allocation(self.db_manager)
+            
+            # Only use dynamic allocation if it's valid
+            if dynamic_allocation.validate():
+                self.config.market_making_allocation = dynamic_allocation.market_making
+                self.config.directional_trading_allocation = dynamic_allocation.directional_trading
+                self.config.quick_flip_allocation = dynamic_allocation.quick_flip
+                self.config.arbitrage_allocation = dynamic_allocation.arbitrage
+                
+                self.logger.info(
+                    f"📊 DYNAMIC ALLOCATION ACTIVE: "
+                    f"MM={dynamic_allocation.market_making:.1%}, "
+                    f"Dir={dynamic_allocation.directional_trading:.1%}, "
+                    f"QF={dynamic_allocation.quick_flip:.1%}"
+                )
+            else:
+                self.logger.warning("Dynamic allocation invalid - using static baseline")
+                
+        except Exception as e:
+            self.logger.warning(f"Could not get dynamic allocation, using static: {e}")
+        
+        # Update capital allocation based on actual balance and (dynamic) config
         self.market_making_capital = self.total_capital * self.config.market_making_allocation
         self.directional_capital = self.total_capital * self.config.directional_trading_allocation
         self.quick_flip_capital = self.total_capital * self.config.quick_flip_allocation
@@ -278,9 +309,19 @@ class UnifiedAdvancedTradingSystem:
             # Step 3: Execute arbitrage opportunities
             arbitrage_results = await self._execute_arbitrage_strategy(markets)
             
+            # Step 4.5: Execute Theta Decay Strategy
+            theta_results = {}
+            if getattr(settings.trading, 'enable_theta_decay', True):
+                self.logger.info("🚀 Executing Theta Decay Strategy...")
+                theta_results = await run_theta_decay_strategy(
+                    self.db_manager,
+                    self.kalshi_client,
+                    self.total_capital
+                )
+
             # Step 4: Compile results
             results = self._compile_unified_results(
-                market_making_results, portfolio_allocation, quick_flip_results, arbitrage_results
+                market_making_results, portfolio_allocation, quick_flip_results, arbitrage_results, theta_results
             )
             
             # Step 4.5: Log if no positions were created (removed emergency fallback)
@@ -309,6 +350,12 @@ class UnifiedAdvancedTradingSystem:
         Execute market making strategy for spread profits.
         """
         try:
+            # Check if market making is enabled in settings
+            from src.config import settings as settings_module
+            if not getattr(settings_module, 'enable_market_making', True):
+                self.logger.info("⏭️ Market making DISABLED in settings - skipping")
+                return {'orders_placed': 0, 'expected_profit': 0.0, 'total_exposure': 0.0}
+            
             self.logger.info(f"🎯 Executing Market Making Strategy on {len(markets)} markets")
             
             # Analyze market making opportunities
@@ -316,7 +363,7 @@ class UnifiedAdvancedTradingSystem:
             
             if not opportunities:
                 self.logger.warning("No market making opportunities found")
-                return {'orders_placed': 0, 'expected_profit': 0.0}
+                return {'orders_placed': 0, 'expected_profit': 0.0, 'total_exposure': 0.0}
             
             # Filter to top opportunities within capital allocation
             max_opportunities = int(self.market_making_capital / 100)  # $100 per opportunity
@@ -334,7 +381,7 @@ class UnifiedAdvancedTradingSystem:
             
         except Exception as e:
             self.logger.error(f"Error in market making strategy: {e}")
-            return {'orders_placed': 0, 'expected_profit': 0.0}
+            return {'orders_placed': 0, 'expected_profit': 0.0, 'total_exposure': 0.0}
 
     async def _execute_directional_trading_strategy(self, markets: List[Market]) -> PortfolioAllocation:
         """
@@ -600,20 +647,24 @@ class UnifiedAdvancedTradingSystem:
                     
                     position.id = position_id
                     
-                    # Execute the position
+                    # Execute the position with edge parameter for smart order type selection
                     live_mode = getattr(settings.trading, 'live_trading_enabled', False)
+                    # Calculate edge for this position
+                    edge = position.confidence - price if position.confidence else 0.0
+                    
                     success = await execute_position(
                         position=position,
                         live_mode=live_mode,
                         db_manager=self.db_manager,
-                        kalshi_client=self.kalshi_client
+                        kalshi_client=self.kalshi_client,
+                        edge=edge  # Pass edge for IOC order selection
                     )
                     
                     if success:
                         results['successful_executions'] += 1
                         results['positions_created'] += 1
                         results['total_capital_used'] += position_value
-                        self.logger.info(f"✅ Executed position: {market_id} {side} {quantity} at {price:.3f}")
+                        self.logger.info(f"✅ Executed position: {market_id} {intended_side} {quantity} at {price:.3f}")
                     else:
                         results['failed_executions'] += 1
                         self.logger.error(f"❌ Failed to execute position for {market_id}")
@@ -631,32 +682,82 @@ class UnifiedAdvancedTradingSystem:
 
     async def _execute_arbitrage_strategy(self, markets: List[Market]) -> Dict:
         """
-        Execute arbitrage opportunities (placeholder for future implementation).
+        Execute arbitrage opportunities using the ArbitrageDetector.
+        
+        Implements:
+        - Spread arbitrage: YES + NO < 100% (guaranteed profit)
+        - Correlated market arbitrage: Related events with price divergence
         """
         try:
-            # TODO: Implement cross-market arbitrage detection
-            # This could include:
-            # - Kalshi vs Polymarket price differences
-            # - Related market arbitrage (correlated events)
-            # - Temporal arbitrage (same event, different expiries)
+            from src.strategies.arbitrage_detector import ArbitrageDetector
             
-            self.logger.info("🎯 Arbitrage opportunities analysis (future feature)")
+            self.logger.info(f"🎯 Executing Arbitrage Strategy on {len(markets)} markets")
+            
+            # Initialize detector
+            detector = ArbitrageDetector(self.db_manager, self.kalshi_client)
+            
+            # Find all arbitrage opportunities
+            opportunities = await detector.find_all_arbitrage_opportunities(markets)
+            
+            if not opportunities:
+                self.logger.info("📊 No arbitrage opportunities found this cycle")
+                return {
+                    'arbitrage_trades': 0,
+                    'arbitrage_profit': 0.0,
+                    'arbitrage_exposure': 0.0
+                }
+            
+            # Limit by allocated capital
+            max_arb_capital = self.arbitrage_capital
+            selected_opportunities = []
+            total_cost = 0.0
+            
+            for opp in opportunities:
+                if total_cost + opp.total_cost <= max_arb_capital:
+                    selected_opportunities.append(opp)
+                    total_cost += opp.total_cost
+            
+            # Execute selected arbitrage trades
+            trades_executed = 0
+            total_expected_profit = 0.0
+            
+            live_mode = getattr(settings.trading, 'live_trading_enabled', False)
+            
+            for opp in selected_opportunities:
+                result = await detector.execute_arbitrage_trade(opp, live_mode)
+                
+                if result['success']:
+                    trades_executed += 1
+                    total_expected_profit += opp.expected_profit
+            
+            # Get summary
+            summary = detector.get_arbitrage_summary(selected_opportunities)
+            
+            self.logger.info(
+                f"✅ Arbitrage Complete: {trades_executed} trades executed, "
+                f"${total_expected_profit:.2f} expected profit, "
+                f"${total_cost:.2f} capital used"
+            )
+            
             return {
-                'arbitrage_trades': 0,
-                'arbitrage_profit': 0.0,
-                'arbitrage_exposure': 0.0
+                'arbitrage_trades': trades_executed,
+                'arbitrage_profit': total_expected_profit,
+                'arbitrage_exposure': total_cost,
+                'spread_opportunities': summary.get('spread_count', 0),
+                'correlated_opportunities': summary.get('correlated_count', 0)
             }
             
         except Exception as e:
             self.logger.error(f"Error in arbitrage strategy: {e}")
-            return {'arbitrage_trades': 0, 'arbitrage_profit': 0.0}
+            return {'arbitrage_trades': 0, 'arbitrage_profit': 0.0, 'arbitrage_exposure': 0.0}
 
     def _compile_unified_results(
         self, 
         market_making_results: Dict, 
         portfolio_allocation: PortfolioAllocation,
         quick_flip_results: Dict,
-        arbitrage_results: Dict
+        arbitrage_results: Dict,
+        theta_results: Dict = None
     ) -> TradingSystemResults:
         """
         Compile results from all strategies into unified metrics.
@@ -667,7 +768,8 @@ class UnifiedAdvancedTradingSystem:
                 market_making_results.get('total_exposure', 0) +
                 portfolio_allocation.total_capital_used +
                 quick_flip_results.get('total_capital_used', 0) +
-                arbitrage_results.get('arbitrage_exposure', 0)
+                arbitrage_results.get('arbitrage_exposure', 0) +
+                (theta_results.get('total_exposure', 0) if theta_results else 0)
             )
             
             # Weight expected returns by capital allocation
@@ -695,7 +797,8 @@ class UnifiedAdvancedTradingSystem:
                 market_making_results.get('orders_placed', 0) // 2 +  # 2 orders per position
                 len(portfolio_allocation.allocations) +
                 quick_flip_results.get('positions_created', 0) +
-                arbitrage_results.get('arbitrage_trades', 0)
+                arbitrage_results.get('arbitrage_trades', 0) +
+                (theta_results.get('trades_executed', 0) if theta_results else 0)
             )
             
             return TradingSystemResults(
@@ -708,6 +811,11 @@ class UnifiedAdvancedTradingSystem:
                 directional_positions=len(portfolio_allocation.allocations),
                 directional_exposure=portfolio_allocation.total_capital_used,
                 directional_expected_return=portfolio_allocation.expected_portfolio_return,
+                
+                # Theta decay
+                theta_trades=theta_results.get('trades_executed', 0) if theta_results else 0,
+                theta_exposure=theta_results.get('total_exposure', 0.0) if theta_results else 0.0,
+                theta_expected_profit=theta_results.get('expected_profit', 0.0) if theta_results else 0.0,
                 
                 # Portfolio metrics
                 total_capital_used=total_capital_used,
@@ -733,8 +841,21 @@ class UnifiedAdvancedTradingSystem:
     async def _manage_risk_and_rebalance(self, results: TradingSystemResults):
         """
         Manage risk and rebalance portfolio if needed.
+        
+        Implements:
+        1. Automatic position sizing reduction when risk limits are exceeded
+        2. Portfolio rebalancing to maintain target strategy allocations
         """
         try:
+            from src.utils.risk_manager import RiskManager
+            
+            # Initialize risk manager
+            risk_manager = RiskManager(
+                self.db_manager,
+                self.kalshi_client,
+                self.config
+            )
+            
             # Check risk constraints
             risk_violations = []
             
@@ -749,13 +870,41 @@ class UnifiedAdvancedTradingSystem:
             
             if risk_violations:
                 self.logger.warning(f"⚠️  Risk violations detected: {risk_violations}")
-                # TODO: Implement automatic position sizing reduction
+                
+                # Automatic position sizing reduction
+                reduction_result = await risk_manager.reduce_position_sizing(
+                    results=results,
+                    violations=risk_violations
+                )
+                
+                if reduction_result['positions_reduced'] > 0:
+                    self.logger.info(
+                        f"📉 RISK REDUCTION: Reduced {reduction_result['positions_reduced']} positions, "
+                        f"freed ${reduction_result['capital_freed']:.2f}"
+                    )
+                    
+                    # Log details for monitoring
+                    for detail in reduction_result.get('details', [])[:5]:  # Limit to first 5
+                        self.logger.info(f"   • {detail}")
             
             # Check if rebalancing is needed
             time_since_rebalance = datetime.now() - self.last_rebalance
             if time_since_rebalance.total_seconds() > (self.config.rebalance_frequency_hours * 3600):
                 self.logger.info("🔄 Portfolio rebalancing triggered")
-                # TODO: Implement rebalancing logic
+                
+                # Execute rebalancing
+                rebalance_result = await risk_manager.rebalance_portfolio()
+                
+                if rebalance_result['rebalanced']:
+                    self.logger.info(f"⚖️ REBALANCED: {rebalance_result['summary']}")
+                    
+                    # Log strategy adjustments
+                    for strategy, adjustment in rebalance_result.get('strategy_adjustments', {}).items():
+                        if adjustment != 0:
+                            self.logger.info(f"   • {strategy}: ${adjustment:+.2f}")
+                else:
+                    self.logger.info(f"⚖️ No rebalancing needed: {rebalance_result['summary']}")
+                
                 self.last_rebalance = datetime.now()
             
             # Performance monitoring
@@ -775,15 +924,18 @@ class UnifiedAdvancedTradingSystem:
         Get comprehensive system performance summary.
         """
         try:
-            # Get individual strategy performance
-            mm_performance = self.market_maker.get_performance_summary()
+            # Get individual strategy performance (may not be initialized)
+            mm_performance = {}
+            if hasattr(self, 'market_maker') and self.market_maker:
+                mm_performance = self.market_maker.get_performance_summary()
             
             return {
                 'system_status': 'active',
-                'total_capital': self.total_capital,
+                'total_capital': getattr(self, 'total_capital', 100),
                 'capital_allocation': {
                     'market_making': self.config.market_making_allocation,
                     'directional': self.config.directional_trading_allocation,
+                    'quick_flip': getattr(self.config, 'quick_flip_allocation', 0.30),
                     'arbitrage': self.config.arbitrage_allocation
                 },
                 'market_making_performance': mm_performance,
@@ -797,7 +949,7 @@ class UnifiedAdvancedTradingSystem:
             
         except Exception as e:
             self.logger.error(f"Error getting performance summary: {e}")
-            return {}
+            return {'total_capital': 100}
 
 
 async def run_unified_trading_system(

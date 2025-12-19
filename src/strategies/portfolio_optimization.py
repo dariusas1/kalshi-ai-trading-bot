@@ -25,7 +25,7 @@ import logging
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, NamedTuple
+from typing import Dict, List, Optional, Tuple, NamedTuple, Any
 from dataclasses import dataclass
 from scipy.optimize import minimize, minimize_scalar
 import warnings
@@ -35,6 +35,7 @@ from src.utils.database import DatabaseManager, Market, Position
 from src.clients.kalshi_client import KalshiClient
 from src.clients.xai_client import XAIClient
 from src.config.settings import settings
+from src.strategies.volatility_sizing import VolatilityAnalyzer, apply_volatility_adjustment
 from src.utils.logging_setup import get_trading_logger
 
 
@@ -126,6 +127,14 @@ class AdvancedPortfolioOptimizer:
         self.realized_returns = []
         self.portfolio_metrics = {}
 
+        # Advanced strategies integration
+        self.volatility_analyzer = VolatilityAnalyzer(
+            kalshi_client,
+            baseline_volatility=getattr(settings.trading, 'volatility_baseline', 0.15),
+            multiplier_min=getattr(settings.trading, 'volatility_multiplier_min', 0.5),
+            multiplier_max=getattr(settings.trading, 'volatility_multiplier_max', 2.0)
+        )
+
     async def optimize_portfolio(
         self, 
         opportunities: List[MarketOpportunity]
@@ -164,7 +173,7 @@ class AdvancedPortfolioOptimizer:
             await self._detect_market_regime()
             
             # Step 3: Calculate Kelly fractions
-            kelly_fractions = self._calculate_kelly_fractions(enhanced_opportunities)
+            kelly_fractions = await self._calculate_kelly_fractions(enhanced_opportunities)
             
             # Step 3.5: Update opportunities with Kelly fractions
             for opp in enhanced_opportunities:
@@ -172,7 +181,7 @@ class AdvancedPortfolioOptimizer:
                 # Update the opportunity object in place
                 opp.kelly_fraction = kelly_val
                 opp.fractional_kelly = kelly_val * 0.5  # Conservative Kelly
-                opp.risk_adjusted_fraction = final_kelly
+                opp.risk_adjusted_fraction = kelly_val
             
             # Step 4: Apply correlation adjustments
             correlation_matrix = await self._estimate_correlation_matrix(enhanced_opportunities)
@@ -254,7 +263,7 @@ class AdvancedPortfolioOptimizer:
         
         return enhanced
 
-    def _calculate_kelly_fractions(self, opportunities: List[MarketOpportunity]) -> Dict[str, float]:
+    async def _calculate_kelly_fractions(self, opportunities: List[MarketOpportunity]) -> Dict[str, float]:
         """
         Calculate Kelly fractions using the Kelly Criterion Extension (KCE).
         
@@ -298,8 +307,24 @@ class AdvancedPortfolioOptimizer:
                 # Apply fractional Kelly (typically 25-50% of full Kelly)
                 fractional_kelly = confidence_adjusted * self.kelly_fraction_multiplier
                 
+                # Apply volatility-adjusted position sizing
+                if getattr(settings.trading, 'enable_volatility_sizing', True):
+                    # Apply adjustment to fractional Kelly
+                    final_kelly, vol_metrics = await apply_volatility_adjustment(
+                        fractional_kelly,
+                        opp.market_id,
+                        self.kalshi_client,
+                        self.volatility_analyzer
+                    )
+                    self.logger.debug(
+                        f"Volatility adjustment for {opp.market_id}: "
+                        f"x{vol_metrics.position_multiplier:.2f} ({vol_metrics.regime} vol)"
+                    )
+                else:
+                    final_kelly = fractional_kelly
+
                 # Ensure reasonable bounds
-                final_kelly = max(0.0, min(self.max_position_fraction, fractional_kelly))
+                final_kelly = max(0.0, min(self.max_position_fraction, final_kelly))
                 
                 # Store calculations
                 opp.kelly_fraction = kelly_standard
@@ -366,6 +391,7 @@ class AdvancedPortfolioOptimizer:
     ) -> float:
         """
         Estimate correlation between two market opportunities.
+        Enhanced with historical price data correlation.
         """
         try:
             correlation = 0.0
@@ -384,13 +410,27 @@ class AdvancedPortfolioOptimizer:
             vol_diff = abs(opp1.volatility - opp2.volatility)
             vol_corr = max(0, 1 - vol_diff)
             
+            # 5. Historical price correlation (NEW - uses actual price data)
+            historical_corr = await self._get_historical_price_correlation(opp1.market_id, opp2.market_id)
+            
             # Combine correlations with weights
-            correlation = (
-                0.4 * category_corr +
-                0.2 * time_corr +
-                0.3 * content_corr +
-                0.1 * vol_corr
-            )
+            # If historical data available, give it significant weight
+            if historical_corr is not None:
+                correlation = (
+                    0.30 * historical_corr +  # Historical data gets highest weight
+                    0.25 * category_corr +
+                    0.15 * time_corr +
+                    0.20 * content_corr +
+                    0.10 * vol_corr
+                )
+            else:
+                # Fallback to heuristic-only weights
+                correlation = (
+                    0.4 * category_corr +
+                    0.2 * time_corr +
+                    0.3 * content_corr +
+                    0.1 * vol_corr
+                )
             
             # Cap maximum correlation
             correlation = min(self.max_correlation, correlation)
@@ -400,6 +440,96 @@ class AdvancedPortfolioOptimizer:
         except Exception as e:
             self.logger.error(f"Error estimating pairwise correlation: {e}")
             return 0.1  # Small default correlation
+    
+    async def _get_historical_price_correlation(
+        self, 
+        market_id1: str, 
+        market_id2: str
+    ) -> Optional[float]:
+        """
+        Calculate correlation between two markets using historical price data.
+        
+        Fetches price history from Kalshi API and computes Pearson correlation
+        between price movements over the available overlapping time period.
+        
+        Returns:
+            Correlation coefficient (-1 to 1) or None if insufficient data.
+        """
+        try:
+            # Fetch price history for both markets (last 7 days)
+            end_ts = int(datetime.now().timestamp())
+            start_ts = int((datetime.now() - timedelta(days=7)).timestamp())
+            
+            history1 = await self.kalshi_client.get_market_history(
+                ticker=market_id1, 
+                start_ts=start_ts, 
+                end_ts=end_ts, 
+                limit=100
+            )
+            history2 = await self.kalshi_client.get_market_history(
+                ticker=market_id2, 
+                start_ts=start_ts, 
+                end_ts=end_ts, 
+                limit=100
+            )
+            
+            # Extract price series
+            prices1 = history1.get('history', [])
+            prices2 = history2.get('history', [])
+            
+            # Need at least 10 data points for meaningful correlation
+            if len(prices1) < 10 or len(prices2) < 10:
+                return None
+            
+            # Create time-aligned price DataFrames
+            df1 = pd.DataFrame(prices1)
+            df2 = pd.DataFrame(prices2)
+            
+            # Ensure we have the expected columns
+            if 'ts' not in df1.columns or 'yes_price' not in df1.columns:
+                return None
+            if 'ts' not in df2.columns or 'yes_price' not in df2.columns:
+                return None
+            
+            # Convert timestamps and set as index
+            df1['ts'] = pd.to_datetime(df1['ts'], unit='s')
+            df2['ts'] = pd.to_datetime(df2['ts'], unit='s')
+            df1.set_index('ts', inplace=True)
+            df2.set_index('ts', inplace=True)
+            
+            # Resample to hourly to align timestamps
+            prices_series1 = df1['yes_price'].resample('1h').last().dropna()
+            prices_series2 = df2['yes_price'].resample('1h').last().dropna()
+            
+            # Find overlapping timestamps
+            common_idx = prices_series1.index.intersection(prices_series2.index)
+            
+            if len(common_idx) < 10:
+                return None
+            
+            # Calculate price returns (differences)
+            aligned1 = prices_series1.loc[common_idx].diff().dropna()
+            aligned2 = prices_series2.loc[common_idx].diff().dropna()
+            
+            if len(aligned1) < 5:
+                return None
+            
+            # Calculate Pearson correlation
+            correlation = aligned1.corr(aligned2)
+            
+            # Handle NaN result
+            if pd.isna(correlation):
+                return None
+            
+            self.logger.debug(
+                f"Historical correlation {market_id1[:10]}/{market_id2[:10]}: {correlation:.3f}"
+            )
+            
+            return float(correlation)
+            
+        except Exception as e:
+            self.logger.debug(f"Could not compute historical correlation: {e}")
+            return None  # Return None so caller uses heuristic fallback
 
     def _apply_correlation_adjustments(
         self, 
@@ -827,6 +957,21 @@ async def create_market_opportunities_from_markets(
     logger = get_trading_logger("portfolio_opportunities")
     opportunities = []
     
+    # 🚨 CRITICAL FIX: Filter out KXMV/parlay markets BEFORE selecting top markets
+    # Otherwise the top 10 by volume may all be KXMV combo markets that get filtered out
+    filtered_markets = []
+    for m in markets:
+        if m.market_id.startswith("KXMV"):
+            continue
+        if hasattr(m, 'title') and m.title and "PARLAY" in m.title.upper():
+            continue
+        filtered_markets.append(m)
+    
+    if len(filtered_markets) < len(markets):
+        logger.info(f"Filtered {len(markets) - len(filtered_markets)} KXMV/parlay markets before volume ranking")
+    
+    markets = filtered_markets
+    
     # Limit markets to prevent excessive AI costs and focus on best opportunities
     max_markets_to_analyze = 10  # REDUCED: More selective (was 20, now 10) to focus on highest quality
     if len(markets) > max_markets_to_analyze:
@@ -849,9 +994,17 @@ async def create_market_opportunities_from_markets(
             if market_prob < 0.05 or market_prob > 0.95:
                 continue
             
+            # Get technical analysis if enabled
+            ml_prediction = None
+            if getattr(settings.trading, 'enable_ml_predictions', True):
+                try:
+                    ml_prediction = await xai_client.ml_predictor.get_prediction(market.market_id)
+                except Exception as ml_e:
+                    logger.warning(f"ML prediction failed for {market.market_id}: {ml_e}")
+
             # Get REAL AI prediction using fast analysis
             predicted_prob, confidence = await _get_fast_ai_prediction(
-                market, xai_client, market_prob
+                market, xai_client, market_prob, ml_prediction
             )
             
             # If AI analysis failed, skip this market
@@ -1177,8 +1330,14 @@ async def _evaluate_immediate_trade(
             # Set the position ID so execute_position can update the database
             position.id = position_id
             
-            # Execute the trade (live_mode=True for immediate trades)
-            success = await execute_position(position, True, db_manager, kalshi_client)
+            # Execute the trade with edge for smart order type selection
+            success = await execute_position(
+                position, 
+                True, 
+                db_manager, 
+                kalshi_client,
+                edge=getattr(opportunity, 'edge', 0.0)  # Pass edge for IOC order selection
+            )
             if success:
                 logger.info(f"✅ IMMEDIATE TRADE EXECUTED: {opportunity.market_id} - ${position_size:.0f} position")
             else:
@@ -1211,7 +1370,8 @@ def _calculate_simple_kelly(opportunity: MarketOpportunity) -> float:
 async def _get_fast_ai_prediction(
     market: Market,
     xai_client: XAIClient,
-    market_price: float
+    market_price: float,
+    ml_prediction: Optional[Any] = None
 ) -> Tuple[Optional[float], Optional[float]]:
     """
     Get a fast AI prediction for a market without expensive analysis.
@@ -1224,6 +1384,8 @@ async def _get_fast_ai_prediction(
         
         Market: {market.title}
         Current YES price: {market_price:.2f}
+        
+        {xai_client.ml_predictor.format_for_prompt(ml_prediction) if ml_prediction else ""}
         
         Provide a FAST prediction in JSON format:
         {{

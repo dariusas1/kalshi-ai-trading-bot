@@ -105,11 +105,34 @@ class BeastModeDashboard:
         Get comprehensive performance metrics across all strategies.
         """
         try:
-            # Get system performance summary
-            system_performance = self.unified_system.get_system_performance_summary()
+            # Get REAL balance from Kalshi
+            try:
+                balance_response = await self.kalshi_client.get_balance()
+                available_cash = balance_response.get('balance', 0) / 100  # Convert cents to dollars
+            except Exception:
+                available_cash = 0
             
             # Get current positions
             positions = await self.db_manager.get_open_positions()
+            
+            # Calculate total position value
+            total_position_value = 0
+            for pos in positions:
+                try:
+                    entry_price = float(getattr(pos, 'entry_price', 0) or 0)
+                    quantity = int(getattr(pos, 'quantity', 0) or 0)
+                    total_position_value += entry_price * quantity
+                except (ValueError, TypeError):
+                    pass
+            
+            total_capital = available_cash + total_position_value
+            
+            # Get system performance summary (may fail if not initialized)
+            try:
+                system_performance = self.unified_system.get_system_performance_summary()
+                system_performance['total_capital'] = total_capital
+            except Exception:
+                system_performance = {'total_capital': total_capital}
             
             # Get recent trades
             recent_trades = await self._get_recent_trade_performance()
@@ -133,6 +156,8 @@ class BeastModeDashboard:
                 'cost_analysis': cost_analysis,
                 'available_markets': len(markets) if markets else 0,
                 'daily_ai_cost': daily_ai_cost,
+                'available_cash': available_cash,
+                'total_position_value': total_position_value,
                 'timestamp': datetime.now().isoformat()
             }
             
@@ -149,18 +174,17 @@ class BeastModeDashboard:
             system_perf = performance.get('system_performance', {})
             positions = performance.get('current_positions', [])
             recent_trades = performance.get('recent_trades', {})
+            available_cash = performance.get('available_cash', 0)
+            total_position_value = performance.get('total_position_value', 0)
             
-            # Calculate total exposure
-            total_exposure = sum(
-                pos.entry_price * pos.quantity for pos in positions
-                if hasattr(pos, 'entry_price') and hasattr(pos, 'quantity')
-            )
-            
-            total_capital = system_perf.get('total_capital', 10000)
+            # Use pre-calculated exposure from get_comprehensive_performance
+            total_exposure = total_position_value
+            total_capital = system_perf.get('total_capital', available_cash + total_position_value)
             capital_used_pct = (total_exposure / total_capital) * 100 if total_capital > 0 else 0
             
-            print(f"💰 Total Capital: ${total_capital:,.0f}")
-            print(f"📈 Current Exposure: ${total_exposure:,.0f} ({capital_used_pct:.1f}%)")
+            print(f"💰 Total Capital: ${total_capital:,.2f}")
+            print(f"💵 Available Cash: ${available_cash:,.2f}")
+            print(f"📈 Current Exposure: ${total_exposure:,.2f} ({capital_used_pct:.1f}%)")
             print(f"🎯 Active Positions: {len(positions)}")
             print(f"📅 Today's Trades: {recent_trades.get('trades_today', 0)}")
             print(f"💵 Today's P&L: ${recent_trades.get('pnl_today', 0):+.2f}")
@@ -265,10 +289,20 @@ class BeastModeDashboard:
             for i, pos in enumerate(positions_sorted[:5], 1):
                 market_id = getattr(pos, 'market_id', 'Unknown')[:20]
                 side = getattr(pos, 'side', 'Unknown')
-                entry_price = getattr(pos, 'entry_price', 0)
-                quantity = getattr(pos, 'quantity', 0)
+                entry_price_raw = getattr(pos, 'entry_price', 0)
+                quantity_raw = getattr(pos, 'quantity', 0)
                 stop_loss = getattr(pos, 'stop_loss_price', None)
                 take_profit = getattr(pos, 'take_profit_price', None)
+                
+                # Convert to float in case stored as string
+                try:
+                    entry_price = float(entry_price_raw) if entry_price_raw else 0
+                except (ValueError, TypeError):
+                    entry_price = 0
+                try:
+                    quantity = int(quantity_raw) if quantity_raw else 0
+                except (ValueError, TypeError):
+                    quantity = 0
                 
                 exposure = entry_price * quantity
                 
@@ -276,9 +310,15 @@ class BeastModeDashboard:
                 print(f"   Side: {side} | Entry: ${entry_price:.2f} | Qty: {quantity}")
                 print(f"   Exposure: ${exposure:.0f}")
                 if stop_loss:
-                    print(f"   Stop Loss: ${stop_loss:.2f}")
+                    try:
+                        print(f"   Stop Loss: ${float(stop_loss):.2f}")
+                    except (ValueError, TypeError):
+                        pass
                 if take_profit:
-                    print(f"   Take Profit: ${take_profit:.2f}")
+                    try:
+                        print(f"   Take Profit: ${float(take_profit):.2f}")
+                    except (ValueError, TypeError):
+                        pass
                 print()
             
             if len(positions) > 5:
@@ -334,27 +374,43 @@ class BeastModeDashboard:
             capital_allocation = system_perf.get('capital_allocation', {})
             
             print(f"\n📈 Strategy Allocation:")
-            print(f"   Market Making: {capital_allocation.get('market_making', 0.4):.0%}")
-            print(f"   Directional: {capital_allocation.get('directional', 0.5):.0%}")
-            print(f"   Arbitrage: {capital_allocation.get('arbitrage', 0.1):.0%}")
+            print(f"   Market Making: {settings.trading.market_making_allocation:.0%}")
+            print(f"   Directional: {settings.trading.directional_allocation:.0%}")
+            print(f"   Quick Flip: {settings.trading.quick_flip_allocation:.0%}")
             
         except Exception as e:
             print(f"Error displaying system health: {e}")
 
     async def _get_recent_trade_performance(self) -> Dict:
-        """Get recent trade performance metrics."""
+        """Get recent trade performance metrics from real Kalshi API data and DB logs."""
         try:
-            # This would query the trade_logs table for recent performance
-            # Simplified implementation
+            from src.utils.pnl_tracker import PnLTracker
+            
+            # Initialize P&L tracker
+            tracker = PnLTracker(self.db_manager, self.kalshi_client)
+            
+            # Get comprehensive P&L metrics
+            metrics = await tracker.get_comprehensive_pnl()
+            
+            return {
+                'trades_today': metrics.trades_today,
+                'pnl_today': metrics.pnl_today,
+                'win_rate_7d': metrics.win_rate_7d,
+                'avg_holding_time': metrics.avg_holding_time_hours,
+                # Extended metrics for internal use
+                'trades_7d': metrics.trades_7d,
+                'pnl_7d': metrics.pnl_7d,
+                'total_pnl': metrics.total_pnl,
+                'total_trades': metrics.total_trades
+            }
+        except Exception as e:
+            self.logger.error(f"Error getting trade performance: {e}") if hasattr(self, 'logger') else print(f"Error getting trade performance: {e}")
             return {
                 'trades_today': 0,
                 'pnl_today': 0.0,
                 'win_rate_7d': 0.0,
                 'avg_holding_time': 0.0
             }
-        except Exception as e:
-            print(f"Error getting trade performance: {e}")
-            return {}
 
     async def _get_cost_analysis(self) -> Dict:
         """Get AI cost analysis."""

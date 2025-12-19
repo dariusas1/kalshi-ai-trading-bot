@@ -355,15 +355,20 @@ REASON: [brief explanation]
             
             position.id = position_id
             
-            # Execute the position
+            # Execute the position with edge parameter for smart order selection
             from src.jobs.execute import execute_position
             live_mode = getattr(settings.trading, 'live_trading_enabled', False)
+            
+            # Quick flip trades typically have high edge (that's why we're scalping)
+            # Entry vs exit price difference gives us the edge
+            edge = (opportunity.exit_price - opportunity.entry_price) / opportunity.entry_price
             
             success = await execute_position(
                 position=position,
                 live_mode=live_mode,
                 db_manager=self.db_manager,
-                kalshi_client=self.kalshi_client
+                kalshi_client=self.kalshi_client,
+                edge=edge  # Pass edge for IOC order selection
             )
             
             if success:
@@ -440,25 +445,58 @@ REASON: [brief explanation]
         current_time = datetime.now()
         positions_to_remove = []
         
-        for market_id, sell_info in self.pending_sells.items():
+        for market_id, sell_info in list(self.pending_sells.items()):
             try:
                 position = sell_info['position']
                 max_hold_until = sell_info['max_hold_until']
+                target_price = sell_info.get('target_price', 0)
+                placed_at = sell_info.get('placed_at', current_time)
                 
-                # Check if we should cut losses (held too long)
+                # 1. Check if sell order has filled using get_fills API
+                filled, fill_price, fill_pnl = await self._check_sell_order_filled(position)
+                
+                if filled:
+                    self.logger.info(
+                        f"✅ Sell order FILLED for {market_id} at ${fill_price:.2f} "
+                        f"(P&L: ${fill_pnl:+.2f})"
+                    )
+                    results['positions_closed'] += 1
+                    results['total_pnl'] += fill_pnl
+                    positions_to_remove.append(market_id)
+                    
+                    # Update position in database as closed
+                    await self._close_position_in_db(position, fill_price, fill_pnl)
+                    continue
+                
+                # 2. Check if we should cut losses (held too long)
                 if current_time > max_hold_until:
                     self.logger.warning(
                         f"⏰ Quick flip held too long: {market_id}, cutting losses"
                     )
                     
                     # Place market order to exit immediately
-                    cut_success = await self._cut_losses_market_order(position)
+                    cut_success, exit_price = await self._cut_losses_market_order(position)
                     if cut_success:
+                        pnl = (exit_price - position.entry_price) * position.quantity
                         results['losses_cut'] += 1
+                        results['total_pnl'] += pnl
                         positions_to_remove.append(market_id)
+                        
+                        # Update position in database
+                        await self._close_position_in_db(position, exit_price, pnl)
+                    continue
                 
-                # TODO: Add logic to check if sell order filled
-                # TODO: Add logic to adjust sell price if market moved against us
+                # 3. Adjust sell price if market moved against us
+                time_held = (current_time - placed_at).total_seconds() / 60  # Minutes
+                
+                # After 10 minutes, check if we need to adjust price
+                if time_held >= 10:
+                    adjusted = await self._maybe_adjust_sell_price(position, target_price, time_held)
+                    if adjusted:
+                        results['orders_adjusted'] += 1
+                        # Update the sell_info with new price
+                        sell_info['target_price'] = adjusted
+                        sell_info['placed_at'] = current_time  # Reset timer
                 
             except Exception as e:
                 self.logger.error(f"Error managing position {market_id}: {e}")
@@ -473,8 +511,159 @@ REASON: [brief explanation]
         
         return results
     
-    async def _cut_losses_market_order(self, position: Position) -> bool:
-        """Place market order to immediately exit a position."""
+    async def _check_sell_order_filled(self, position: Position) -> Tuple[bool, float, float]:
+        """
+        Check if a sell order has been filled using the Kalshi fills API.
+        
+        Returns:
+            Tuple of (is_filled, fill_price, pnl)
+        """
+        try:
+            # Get recent fills for this market
+            fills_response = await self.kalshi_client.get_fills(
+                ticker=position.market_id,
+                limit=20
+            )
+            
+            fills = fills_response.get('fills', [])
+            
+            for fill in fills:
+                # Check if this is a sell fill for our position
+                if (fill.get('action') == 'sell' and 
+                    fill.get('side', '').lower() == position.side.lower()):
+                    
+                    fill_count = fill.get('count', 0)
+                    
+                    # Check if fill matches our position quantity (or close to it)
+                    if fill_count >= position.quantity * 0.9:  # Allow small variance
+                        # Calculate fill price in dollars
+                        if position.side.upper() == 'YES':
+                            fill_price = fill.get('yes_price', 0) / 100
+                        else:
+                            fill_price = fill.get('no_price', 0) / 100
+                        
+                        # Calculate P&L
+                        pnl = (fill_price - position.entry_price) * fill_count
+                        
+                        return True, fill_price, pnl
+            
+            return False, 0.0, 0.0
+            
+        except Exception as e:
+            self.logger.debug(f"Error checking fills for {position.market_id}: {e}")
+            return False, 0.0, 0.0
+    
+    async def _maybe_adjust_sell_price(
+        self, 
+        position: Position, 
+        current_target: float,
+        time_held_minutes: float
+    ) -> Optional[float]:
+        """
+        Adjust sell price if market has moved against us.
+        
+        Strategy:
+        - After 10 min: Lower price by 20% of profit margin
+        - After 20 min: Lower price by 50% of profit margin
+        - After 25 min: Lower to breakeven + 1 cent
+        """
+        try:
+            # Get current market price
+            market_data = await self.kalshi_client.get_market(position.market_id)
+            if not market_data:
+                return None
+            
+            market_info = market_data.get('market', {})
+            
+            if position.side.upper() == 'YES':
+                current_bid = market_info.get('yes_bid', 0) / 100
+            else:
+                current_bid = market_info.get('no_bid', 0) / 100
+            
+            # Calculate target based on time held
+            profit_margin = current_target - position.entry_price
+            
+            if time_held_minutes >= 25:
+                # Just try to break even + 1 cent
+                new_target = position.entry_price + 0.01
+            elif time_held_minutes >= 20:
+                # Lower by 50% of profit margin
+                new_target = position.entry_price + (profit_margin * 0.5)
+            elif time_held_minutes >= 10:
+                # Lower by 20% of profit margin
+                new_target = position.entry_price + (profit_margin * 0.8)
+            else:
+                return None
+            
+            # Only adjust if new target is lower and still profitable
+            if new_target < current_target and new_target > position.entry_price:
+                self.logger.info(
+                    f"📉 Adjusting sell price for {position.market_id}: "
+                    f"${current_target:.2f} → ${new_target:.2f} "
+                    f"(held {time_held_minutes:.0f} min)"
+                )
+                
+                # Place new sell limit order at adjusted price
+                await place_sell_limit_order(
+                    position=position,
+                    limit_price=new_target,
+                    db_manager=self.db_manager,
+                    kalshi_client=self.kalshi_client
+                )
+                
+                return new_target
+            
+            return None
+            
+        except Exception as e:
+            self.logger.debug(f"Error adjusting sell price: {e}")
+            return None
+    
+    async def _close_position_in_db(
+        self, 
+        position: Position, 
+        exit_price: float, 
+        pnl: float
+    ):
+        """Update database to mark position as closed with P&L."""
+        try:
+            from src.utils.database import TradeLog
+            
+            # Create trade log entry
+            trade_log = TradeLog(
+                market_id=position.market_id,
+                side=position.side,
+                entry_price=position.entry_price,
+                exit_price=exit_price,
+                quantity=position.quantity,
+                pnl=pnl,
+                entry_timestamp=position.timestamp,
+                exit_timestamp=datetime.now(),
+                rationale="quick_flip_sell_filled",
+                strategy="quick_flip_scalping"
+            )
+            
+            # Add trade log
+            await self.db_manager.add_trade_log(trade_log)
+            
+            # Mark position as closed
+            await self.db_manager.close_position(position.id)
+            
+            self.logger.info(
+                f"📝 Position closed in DB: {position.market_id} "
+                f"P&L: ${pnl:+.2f}"
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Error closing position in DB: {e}")
+    
+    async def _cut_losses_market_order(self, position: Position) -> Tuple[bool, float]:
+        """
+        Place market order to immediately exit a position.
+        
+        Returns:
+            Tuple of (success, exit_price)
+        """
         try:
             # Place market sell order to cut losses
             import uuid
@@ -486,8 +675,15 @@ REASON: [brief explanation]
                 "side": position.side.lower(),
                 "action": "sell",
                 "count": position.quantity,
-                "type": "market"
+                "type_": "market"  # Fixed: use type_ not type
             }
+            
+            # 🚨 FIX: Kalshi API requires exactly ONE price field for all orders
+            # For sell orders, use 1 cent (min we'll accept) for the side we're selling
+            if position.side.lower() == "yes":
+                order_params["yes_price"] = 1  # Min: 1 cent
+            else:
+                order_params["no_price"] = 1   # Min: 1 cent
             
             live_mode = getattr(settings.trading, 'live_trading_enabled', False)
             
@@ -495,24 +691,40 @@ REASON: [brief explanation]
                 response = await self.kalshi_client.place_order(**order_params)
                 
                 if response and 'order' in response:
+                    order_info = response.get('order', {})
+                    # Get fill price from order response
+                    if position.side.upper() == 'YES':
+                        exit_price = order_info.get('yes_price', position.entry_price * 100) / 100
+                    else:
+                        exit_price = order_info.get('no_price', position.entry_price * 100) / 100
+                    
                     self.logger.info(
                         f"🛑 Loss cut order placed: {position.side} {position.quantity} "
-                        f"MARKET SELL for {position.market_id}"
+                        f"MARKET SELL for {position.market_id} at ${exit_price:.2f}"
                     )
-                    return True
+                    return True, exit_price
                 else:
                     self.logger.error(f"Failed to place loss cut order: {response}")
-                    return False
+                    return False, 0.0
             else:
+                # Simulated mode - estimate exit price from current market
+                market_data = await self.kalshi_client.get_market(position.market_id)
+                market_info = market_data.get('market', {}) if market_data else {}
+                
+                if position.side.upper() == 'YES':
+                    exit_price = market_info.get('yes_bid', position.entry_price * 100) / 100
+                else:
+                    exit_price = market_info.get('no_bid', position.entry_price * 100) / 100
+                
                 self.logger.info(
                     f"📝 SIMULATED loss cut: {position.side} {position.quantity} "
-                    f"MARKET SELL for {position.market_id}"
+                    f"MARKET SELL for {position.market_id} at ${exit_price:.2f}"
                 )
-                return True
+                return True, exit_price
                 
         except Exception as e:
             self.logger.error(f"Error cutting losses: {e}")
-            return False
+            return False, 0.0
 
 
 async def run_quick_flip_strategy(

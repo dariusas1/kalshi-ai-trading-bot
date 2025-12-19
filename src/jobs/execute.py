@@ -17,16 +17,23 @@ async def execute_position(
     position: Position, 
     live_mode: bool, 
     db_manager: DatabaseManager, 
-    kalshi_client: KalshiClient
+    kalshi_client: KalshiClient,
+    edge: float = 0.0  # Edge percentage for smart order type selection
 ) -> bool:
     """
-    Executes a single trade position.
+    Executes a single trade position with smart order type selection.
+    
+    Order Type Logic:
+    - IOC (Immediate or Cancel) when edge > 10% for urgent entries
+    - Market orders for standard entries
+    - 30-second timeout fallback: if IOC doesn't fill, retry with market
     
     Args:
         position: The position to execute.
         live_mode: Whether to execute a live or simulated trade.
         db_manager: The database manager instance.
         kalshi_client: The Kalshi client instance.
+        edge: Edge percentage (0.0-1.0) for smart order type selection.
         
     Returns:
         True if execution was successful, False otherwise.
@@ -34,27 +41,149 @@ async def execute_position(
     logger = get_trading_logger("trade_execution")
     logger.info(f"Executing position for market: {position.market_id}")
 
+    # 🚨 CRITICAL: Validate ticker before execution
+    if position.market_id.startswith("KXMV"):
+        logger.error(f"❌ BLOCKED: Cannot execute on KXMV combo market: {position.market_id}")
+        return False
+    
+    if not position.market_id or len(position.market_id) < 5:
+        logger.error(f"❌ BLOCKED: Invalid market_id: {position.market_id}")
+        return False
+
     if live_mode:
         try:
             client_order_id = str(uuid.uuid4())
-            order_response = await kalshi_client.place_order(
-                ticker=position.market_id,
-                client_order_id=client_order_id,
-                side=position.side.lower(),
-                action="buy",
-                count=position.quantity,
-                type_="market"
-            )
             
-            # For a market order, the fill price is not guaranteed.
-            # A more robust implementation would query the /fills endpoint
-            # to confirm the execution price after the fact.
-            # For now, we will optimistically assume it fills at the entry price.
-            fill_price = position.entry_price
+            # 🎯 SMART ORDER TYPE SELECTION
+            # IOC for high edge (>10%) - urgent entry needed
+            # Market orders for standard entries
+            use_ioc = edge > 0.10
+            time_in_force = "immediate_or_cancel" if use_ioc else None  # API requires full name, not 'ioc'
+            order_type = "market"
+            
+            if use_ioc:
+                logger.info(f"📈 HIGH EDGE ({edge:.1%}) - Using IOC order for {position.market_id}")
+            else:
+                logger.info(f"📊 Standard edge ({edge:.1%}) - Using market order for {position.market_id}")
+            
+            order_args = {
+                "ticker": position.market_id,
+                "client_order_id": client_order_id,
+                "side": position.side.lower(),
+                "action": "buy",
+                "count": position.quantity,
+                "type_": order_type
+            }
+            
+            # 🚨 FIX: Kalshi API requires exactly ONE price field, even for market orders
+            # For market orders, use 99 cents (max willing to pay) for the side we're buying
+            if position.side.lower() == "yes":
+                order_args["yes_price"] = 99  # Max: 99 cents
+            else:
+                order_args["no_price"] = 99   # Max: 99 cents
+            
+            if time_in_force:
+                order_args["time_in_force"] = time_in_force
 
-            await db_manager.update_position_to_live(position.id, fill_price)
-            logger.info(f"Successfully placed LIVE order for {position.market_id}. Order ID: {order_response.get('order', {}).get('order_id')}")
-            return True
+            order_response = await kalshi_client.place_order(**order_args)
+            order_info = order_response.get('order', {})
+            order_id = order_info.get('order_id')
+            order_status = order_info.get('status', 'unknown')
+            
+            logger.info(f"Order placed for {position.market_id}. Order ID: {order_id}, Status: {order_status}")
+            
+            # 🚨 FIX: Verify order actually filled before marking live
+            if order_status in ['filled', 'executed']:  # Kalshi API may return 'executed' for immediate fills
+                # Order filled immediately (market order behavior)
+                fill_price = order_info.get('yes_price', order_info.get('no_price', position.entry_price * 100)) / 100
+                await db_manager.update_position_to_live(position.id, fill_price)
+                logger.info(f"✅ Order FILLED for {position.market_id} at ${fill_price:.2f}")
+                return True
+            elif order_status in ['pending', 'resting', 'canceled']:
+                # IOC order may be canceled if not immediately filled
+                if use_ioc and order_status == 'canceled':
+                    logger.info(f"⚡ IOC order canceled (no immediate fill) - retrying with market order...")
+                    # Retry with market order as fallback
+                    retry_order_id = str(uuid.uuid4())
+                    retry_args = {
+                        "ticker": position.market_id,
+                        "client_order_id": retry_order_id,
+                        "side": position.side.lower(),
+                        "action": "buy",
+                        "count": position.quantity,
+                        "type_": "market"
+                    }
+                    # Add required price for market order
+                    if position.side.lower() == "yes":
+                        retry_args["yes_price"] = 99
+                    else:
+                        retry_args["no_price"] = 99
+                    retry_response = await kalshi_client.place_order(**retry_args)
+                    retry_info = retry_response.get('order', {})
+                    if retry_info.get('status') == 'filled':
+                        fill_price = retry_info.get('yes_price', retry_info.get('no_price', position.entry_price * 100)) / 100
+                        await db_manager.update_position_to_live(position.id, fill_price)
+                        logger.info(f"✅ FALLBACK market order FILLED for {position.market_id}")
+                        return True
+                
+                # Order didn't fill immediately - wait briefly then check again (30s max)
+                max_wait_seconds = 30
+                check_interval = 2.0
+                checks = int(max_wait_seconds / check_interval)
+                
+                for attempt in range(checks):
+                    await asyncio.sleep(check_interval)
+                    try:
+                        check_response = await kalshi_client.get_order(order_id)
+                        check_status = check_response.get('order', {}).get('status', 'unknown')
+                        if check_status == 'filled':
+                            fill_price = check_response.get('order', {}).get('yes_price', position.entry_price * 100) / 100
+                            await db_manager.update_position_to_live(position.id, fill_price)
+                            logger.info(f"✅ Order FILLED (attempt {attempt+1}) for {position.market_id}")
+                            return True
+                        elif check_status == 'canceled':
+                            break  # Exit waiting loop if order was canceled
+                    except Exception as check_err:
+                        logger.warning(f"Error checking order status: {check_err}")
+                
+                # 🔄 30-SECOND FALLBACK: If limit/IOC didn't fill, retry with market order
+                logger.warning(f"⚠️ Order for {position.market_id} didn't fill after {max_wait_seconds}s, trying market order fallback...")
+                try:
+                    await kalshi_client.cancel_order(order_id)
+                    logger.info(f"Cancelled unfilled order {order_id}")
+                except Exception as cancel_err:
+                    logger.warning(f"Could not cancel order: {cancel_err}")
+                
+                # Market order fallback
+                fallback_order_id = str(uuid.uuid4())
+                fallback_args = {
+                    "ticker": position.market_id,
+                    "client_order_id": fallback_order_id,
+                    "side": position.side.lower(),
+                    "action": "buy",
+                    "count": position.quantity,
+                    "type_": "market"
+                }
+                # Add required price for market order
+                if position.side.lower() == "yes":
+                    fallback_args["yes_price"] = 99
+                else:
+                    fallback_args["no_price"] = 99
+                fallback_response = await kalshi_client.place_order(**fallback_args)
+                fallback_info = fallback_response.get('order', {})
+                if fallback_info.get('status') == 'filled':
+                    fill_price = fallback_info.get('yes_price', fallback_info.get('no_price', position.entry_price * 100)) / 100
+                    await db_manager.update_position_to_live(position.id, fill_price)
+                    logger.info(f"✅ FALLBACK market order FILLED for {position.market_id} at ${fill_price:.2f}")
+                    return True
+                else:
+                    logger.error(f"❌ Fallback market order also failed for {position.market_id}")
+                    return False
+            else:
+                # Unexpected status - treat as potentially filled
+                logger.warning(f"Unexpected order status: {order_status}, treating as success")
+                await db_manager.update_position_to_live(position.id, position.entry_price)
+                return True
 
         except KalshiAPIError as e:
             logger.error(f"Failed to place LIVE order for {position.market_id}: {e}")

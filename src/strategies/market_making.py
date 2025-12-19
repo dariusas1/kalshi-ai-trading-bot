@@ -110,6 +110,11 @@ class AdvancedMarketMaker:
         self.markets_traded = 0
         self.total_volume = 0
         self.win_rate = 0.0
+        
+        # Inventory tracking
+        self.net_yes_inventory = 0
+        self.net_no_inventory = 0
+        self.max_inventory_skew = getattr(settings.trading, 'max_inventory_risk', 500) # $500 max skew
 
     async def analyze_market_making_opportunities(
         self, 
@@ -222,7 +227,7 @@ class AdvancedMarketMaker:
             total_expected_profit = yes_spread_profit + no_spread_profit
             
             # Calculate optimal position sizes using Kelly Criterion
-            yes_size, no_size = self._calculate_optimal_sizes(
+            yes_size, no_size = await self._calculate_optimal_sizes(
                 yes_edge, no_edge, volatility, ai_confidence
             )
             
@@ -276,7 +281,7 @@ class AdvancedMarketMaker:
             self.logger.error(f"Error estimating volatility: {e}")
             return 0.05  # Default 5%
 
-    def _calculate_optimal_sizes(
+    async def _calculate_optimal_sizes(
         self, 
         yes_edge: float, 
         no_edge: float, 
@@ -313,11 +318,60 @@ class AdvancedMarketMaker:
             yes_size = max(10, yes_size)  # Minimum $10
             no_size = max(10, no_size)
             
+            # Adjust sizes based on inventory skew to hedge
+            yes_size, no_size = await self._calculate_skew_adjusted_sizes(yes_size, no_size)
+            
             return yes_size, no_size
             
         except Exception as e:
             self.logger.error(f"Error calculating sizes: {e}")
             return 50, 50  # Default sizes
+
+    async def _update_net_inventory(self):
+        """Update net YES/NO inventory from active positions."""
+        try:
+            positions = await self.db_manager.get_active_positions()
+            
+            self.net_yes_inventory = sum(p.quantity for p in positions if p.side == 'YES' and p.strategy == 'market_making')
+            self.net_no_inventory = sum(p.quantity for p in positions if p.side == 'NO' and p.strategy == 'market_making')
+            
+            skew = self.net_yes_inventory - self.net_no_inventory
+            if abs(skew) > self.max_inventory_skew * 0.8:
+                self.logger.warning(f"⚠️ High inventory skew detected: {skew:+.2f} contracts (YES: {self.net_yes_inventory}, NO: {self.net_no_inventory})")
+                
+        except Exception as e:
+            self.logger.error(f"Error updating inventory: {e}")
+
+    async def _calculate_skew_adjusted_sizes(self, base_yes_size: int, base_no_size: int) -> Tuple[int, int]:
+        """
+        Adjust YES/NO sizes to reduce inventory skew.
+        
+        If we have too many YES, we reduce YES buy size and increase NO buy size.
+        """
+        await self._update_net_inventory()
+        
+        skew = self.net_yes_inventory - self.net_no_inventory
+        
+        # No adjustment if skew is small
+        if abs(skew) < 50:
+            return base_yes_size, base_no_size
+            
+        # Inventory penalty factor (0.0 to 1.0)
+        # As skew approaches max_inventory_skew, we stop buying the over-inventoried side
+        penalty = min(1.0, abs(skew) / self.max_inventory_skew)
+        
+        if skew > 0:  # Too many YES
+            # Reduce YES size, increase NO size
+            adjusted_yes = int(base_yes_size * (1 - penalty))
+            adjusted_no = int(base_no_size * (1 + (penalty * 0.5))) # Less aggressive increase
+            self.logger.info(f"⚖️ Skew adjustment (YES-heavy): YES {base_yes_size} -> {adjusted_yes}, NO {base_no_size} -> {adjusted_no}")
+            return adjusted_yes, adjusted_no
+        else:  # Too many NO
+            # Reduce NO size, increase YES size
+            adjusted_no = int(base_no_size * (1 - penalty))
+            adjusted_yes = int(base_yes_size * (1 + (penalty * 0.5)))
+            self.logger.info(f"⚖️ Skew adjustment (NO-heavy): NO {base_no_size} -> {adjusted_no}, YES {base_yes_size} -> {adjusted_yes}")
+            return adjusted_yes, adjusted_no
 
     async def execute_market_making_strategy(
         self, 

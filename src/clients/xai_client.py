@@ -22,6 +22,7 @@ from xai_sdk.search import SearchParameters
 from src.config.settings import settings
 from src.utils.logging_setup import TradingLoggerMixin, log_error_with_context
 from src.utils.prompts import SIMPLIFIED_PROMPT_TPL
+from src.strategies.ml_predictions import MLPricePredictor, MLPrediction
 
 
 @dataclass
@@ -31,6 +32,7 @@ class TradingDecision:
     side: str    # "yes", "no"
     confidence: float  # 0.0 to 1.0
     limit_price: Optional[int] = None # The limit price for the order in cents.
+    reasoning: Optional[str] = None   # Explanation for the decision
 
 
 @dataclass
@@ -50,16 +52,18 @@ class XAIClient(TradingLoggerMixin):
     Uses Grok models for market analysis and trading strategy.
     """
     
-    def __init__(self, api_key: Optional[str] = None, db_manager=None):
+    def __init__(self, api_key: Optional[str] = None, db_manager=None, kalshi_client=None):
         """
         Initialize xAI client.
         
         Args:
             api_key: xAI API key (defaults to settings)
             db_manager: Optional DatabaseManager for logging queries
+            kalshi_client: Optional KalshiClient for ML predictions
         """
         self.api_key = api_key or settings.api.xai_api_key
         self.db_manager = db_manager
+        self.kalshi_client = kalshi_client
         
         # Initialize xAI async client with proper timeout for reasoning models
         self.client = AsyncClient(api_key=self.api_key, timeout=3600.0)  # 3600s as recommended by xAI docs
@@ -89,6 +93,12 @@ class XAIClient(TradingLoggerMixin):
             daily_limit=self.daily_tracker.daily_limit,
             today_cost=self.daily_tracker.total_cost,
             today_requests=self.daily_tracker.request_count
+        )
+        
+        # ML Predictions integration
+        self.ml_predictor = MLPricePredictor(
+            self.kalshi_client,
+            lookback_hours=getattr(settings.trading, 'ml_lookback_hours', 168)
         )
 
     def _load_daily_tracker(self) -> DailyUsageTracker:
@@ -431,11 +441,104 @@ Provide a brief, factual summary under {max_length//2} words. If no current info
             truncated_query = query[:100] + "..." if len(query) > 100 else query
             return f"Current information about '{truncated_query}' requires live data access. Analyzing based on available market data and general knowledge. [Fallback: Search unavailable]"
 
+    async def get_ensemble_decision(
+        self,
+        market_data: Dict,
+        portfolio_data: Dict,
+        news_summary: str = "",
+        min_consensus_confidence: float = 0.6
+    ) -> Optional[TradingDecision]:
+        """
+        Get trading decision using multi-model ensemble (Grok-4 + Grok-3).
+        
+        Both models must agree on action and side with sufficient confidence
+        for the trade to be approved. Used for high-stakes trades.
+        
+        Args:
+            market_data: Market information
+            portfolio_data: Portfolio state
+            news_summary: Optional news context
+            min_consensus_confidence: Minimum confidence required from both models
+            
+        Returns:
+            TradingDecision if models reach consensus, None otherwise.
+        """
+        from src.config import settings as config_settings
+        
+        if not config_settings.multi_model_ensemble:
+            # Feature disabled - use regular single-model decision
+            return await self.get_trading_decision(market_data, portfolio_data, news_summary)
+        
+        self.logger.info("🔄 Using multi-model ensemble for decision")
+        
+        try:
+            # Query primary model (Grok-4)
+            primary_decision = await self._get_trading_decision_with_prompt(
+                market_data, portfolio_data, news_summary, ml_prediction=None, use_simplified=False
+            )
+            
+            if not primary_decision:
+                self.logger.warning("Primary model (Grok-4) returned no decision")
+                return None
+            
+            # Query fallback model (Grok-3) with same prompt
+            # Temporarily switch model
+            original_model = self.primary_model
+            self.primary_model = self.fallback_model
+            
+            try:
+                secondary_decision = await self._get_trading_decision_with_prompt(
+                    market_data, portfolio_data, news_summary, ml_prediction=None, use_simplified=True
+                )
+            finally:
+                self.primary_model = original_model  # Restore
+            
+            if not secondary_decision:
+                self.logger.warning("Secondary model (Grok-3) returned no decision")
+                return None
+            
+            # Check consensus
+            action_match = primary_decision.action == secondary_decision.action
+            side_match = primary_decision.side == secondary_decision.side
+            
+            primary_confident = primary_decision.confidence >= min_consensus_confidence
+            secondary_confident = secondary_decision.confidence >= min_consensus_confidence
+            
+            if action_match and side_match and primary_confident and secondary_confident:
+                # Consensus reached - use average confidence
+                avg_confidence = (primary_decision.confidence + secondary_decision.confidence) / 2
+                
+                self.logger.info(
+                    f"✅ ENSEMBLE CONSENSUS: {primary_decision.action} {primary_decision.side} "
+                    f"(Grok-4: {primary_decision.confidence:.1%}, Grok-3: {secondary_decision.confidence:.1%})"
+                )
+                
+                return TradingDecision(
+                    action=primary_decision.action,
+                    side=primary_decision.side,
+                    confidence=avg_confidence,
+                    limit_price=primary_decision.limit_price,
+                    reasoning=f"[ENSEMBLE] Grok-4 + Grok-3 consensus. {primary_decision.reasoning}"
+                )
+            else:
+                self.logger.info(
+                    f"⚠️ ENSEMBLE DISAGREEMENT: "
+                    f"Grok-4: {primary_decision.action}/{primary_decision.side} ({primary_decision.confidence:.1%}), "
+                    f"Grok-3: {secondary_decision.action}/{secondary_decision.side} ({secondary_decision.confidence:.1%})"
+                )
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"Error in ensemble decision: {e}")
+            # Fall back to single-model decision
+            return await self.get_trading_decision(market_data, portfolio_data, news_summary)
+
     async def get_trading_decision(
         self,
         market_data: Dict,
         portfolio_data: Dict,
-        news_summary: str = ""
+        news_summary: str = "",
+        ml_prediction: Optional[MLPrediction] = None
     ) -> Optional[TradingDecision]:
         """
         Get a trading decision from the AI with improved token management.
@@ -443,7 +546,7 @@ Provide a brief, factual summary under {max_length//2} words. If no current info
         try:
             # First try with full prompt
             decision = await self._get_trading_decision_with_prompt(
-                market_data, portfolio_data, news_summary, use_simplified=False
+                market_data, portfolio_data, news_summary, ml_prediction, use_simplified=False
             )
             
             if decision:
@@ -452,7 +555,7 @@ Provide a brief, factual summary under {max_length//2} words. If no current info
             # If that fails, try with simplified prompt
             self.logger.info("Trying simplified prompt for trading decision")
             decision = await self._get_trading_decision_with_prompt(
-                market_data, portfolio_data, news_summary, use_simplified=True
+                market_data, portfolio_data, news_summary, ml_prediction, use_simplified=True
             )
             
             return decision
@@ -466,6 +569,7 @@ Provide a brief, factual summary under {max_length//2} words. If no current info
         market_data: Dict,
         portfolio_data: Dict,
         news_summary: str = "",
+        ml_prediction: Optional[MLPrediction] = None,
         use_simplified: bool = False
     ) -> Optional[TradingDecision]:
         """
@@ -473,9 +577,9 @@ Provide a brief, factual summary under {max_length//2} words. If no current info
         """
         try:
             if use_simplified:
-                prompt = self._create_simplified_trading_prompt(market_data, portfolio_data, news_summary)
+                prompt = self._create_simplified_trading_prompt(market_data, portfolio_data, news_summary, ml_prediction)
             else:
-                prompt = self._create_full_trading_prompt(market_data, portfolio_data, news_summary)
+                prompt = self._create_full_trading_prompt(market_data, portfolio_data, news_summary, ml_prediction)
             
             messages = [{"role": "user", "content": prompt}]
             
@@ -502,11 +606,17 @@ Provide a brief, factual summary under {max_length//2} words. If no current info
         self,
         market_data: Dict,
         portfolio_data: Dict,
-        news_summary: str
+        news_summary: str,
+        ml_prediction: Optional[MLPrediction] = None
     ) -> str:
         """
         Create a simplified, token-efficient prompt for trading decisions.
         """
+        # technical analysis context
+        ml_context = "No technical analysis available."
+        if ml_prediction and getattr(settings.trading, 'enable_ml_predictions', True):
+            ml_context = self.ml_predictor.format_for_prompt(ml_prediction)
+
         # Extract key information
         title = market_data.get('title', 'Unknown Market')
         yes_price = market_data.get('yes_price', 50)
@@ -523,6 +633,7 @@ Market: {title}
 YES: {yes_price}¢ | NO: {no_price}¢ | Volume: ${volume:,.0f}
 
 News: {truncated_news}
+Technical: {ml_context}
 
 Rules:
 - Only trade if you have >10% edge (your probability - market price)
@@ -538,13 +649,19 @@ Required format:
         self,
         market_data: Dict,
         portfolio_data: Dict,
-        news_summary: str
+        news_summary: str,
+        ml_prediction: Optional[MLPrediction] = None
     ) -> str:
         """
         Create the full trading prompt with detailed analysis.
         """
         from src.utils.prompts import MULTI_AGENT_PROMPT_TPL
         
+        # technical analysis context
+        ml_context = "No technical analysis available."
+        if ml_prediction and getattr(settings.trading, 'enable_ml_predictions', True):
+            ml_context = self.ml_predictor.format_for_prompt(ml_prediction)
+
         # Use the existing comprehensive prompt
         return MULTI_AGENT_PROMPT_TPL.format(
             title=market_data.get('title', 'Unknown Market'),
@@ -554,6 +671,7 @@ Required format:
             volume=market_data.get('volume', 0),
             days_to_expiry=market_data.get('days_to_expiry', 30),
             news_summary=news_summary,
+            ml_context=ml_context,
             cash=portfolio_data.get('cash', 1000),
             max_trade_value=portfolio_data.get('max_trade_value', 100),
             max_position_pct=portfolio_data.get('max_position_pct', 5),

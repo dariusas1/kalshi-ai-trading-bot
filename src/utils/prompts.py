@@ -24,6 +24,7 @@ You are a team of expert Kalshi prediction traders:
 - **Volume:** {volume}
 - **Expires In (Days):** {days_to_expiry}
 - **News Summary:** {news_summary}
+- **Technical Analysis (ML):** {ml_context}
 
 ---
 **Portfolio Context:**
@@ -67,6 +68,7 @@ Analyze this prediction market and decide whether to trade.
 **Cash:** ${cash:,.2f}  **Max Trade:** ${max_trade_value:,.2f}
 
 **Context:** {news_summary}
+**Technical:** {ml_context}
 
 **Rules:** Only trade if EV > {ev_threshold}%. EV = (Your probability × 100) - Market price
 
