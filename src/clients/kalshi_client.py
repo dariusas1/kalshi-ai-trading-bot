@@ -8,6 +8,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -68,37 +69,41 @@ class KalshiClient(TradingLoggerMixin):
         self.logger.info("Kalshi client initialized", api_key_length=len(self.api_key) if self.api_key else 0)
     
     def _load_private_key(self) -> None:
-        """
-        Load private key from environment variable or file.
-        
-        Priority:
-        1. KALSHI_PRIVATE_KEY env var (base64 encoded PEM) - for Railway/cloud deployment
-        2. File path (default: kalshi_private_key) - for local development
-        """
-        import os
-        import base64
-        
+        """Load private key from environment variable or file."""
         try:
-            # First, try loading from environment variable (for Railway deployment)
-            env_private_key = os.environ.get('KALSHI_PRIVATE_KEY')
-            if env_private_key:
-                try:
-                    # Decode from base64
-                    key_bytes = base64.b64decode(env_private_key)
-                    self.private_key = serialization.load_pem_private_key(
-                        key_bytes,
-                        password=None
-                    )
-                    self.logger.info("Private key loaded successfully from environment variable")
-                    return
-                except Exception as e:
-                    self.logger.warning(f"Failed to load private key from env var: {e}, trying file path...")
-            
-            # Fall back to loading from file (for local development)
+            # First try to load from environment variable (for Railway deployment)
+            private_key_env = os.environ.get('KALSHI_PRIVATE_KEY')
+            self.logger.info(f"Checking for KALSHI_PRIVATE_KEY environment variable...")
+            self.logger.info(f"KALSHI_PRIVATE_KEY exists: {bool(private_key_env)}")
+
+            if private_key_env:
+                self.logger.info(f"KALSHI_PRIVATE_KEY found, length: {len(private_key_env)}")
+
+                # Remove any surrounding whitespace or newlines
+                private_key_env = private_key_env.strip()
+
+                # Check if it looks like a PEM key
+                if not private_key_env.startswith('-----BEGIN PRIVATE KEY-----'):
+                    self.logger.error("KALSHI_PRIVATE_KEY does not appear to be in PEM format")
+                    raise KalshiAPIError("KALSHI_PRIVATE_KEY is not in valid PEM format")
+
+                # Convert to bytes
+                private_key_bytes = private_key_env.encode('utf-8')
+                self.logger.info(f"Private key converted to bytes, length: {len(private_key_bytes)}")
+
+                # Load private key from environment variable
+                self.private_key = serialization.load_pem_private_key(
+                    private_key_bytes,
+                    password=None
+                )
+                self.logger.info("Private key loaded successfully from environment variable")
+                return
+
+            # Fall back to file-based loading (for local development)
             private_key_path = Path(self.private_key_path)
             if not private_key_path.exists():
                 raise KalshiAPIError(f"Private key file not found: {self.private_key_path}")
-            
+
             with open(private_key_path, 'rb') as f:
                 self.private_key = serialization.load_pem_private_key(
                     f.read(),
@@ -417,13 +422,11 @@ class KalshiClient(TradingLoggerMixin):
         Returns:
             Order response
         """
-        # 🚨 CRITICAL: Validate ticker before sending to API
+        # Validate ticker before sending to API
         if not ticker or not ticker.strip():
             raise KalshiAPIError("Invalid ticker: ticker cannot be empty")
         if len(ticker) < 5:
             raise KalshiAPIError(f"Invalid ticker: {ticker} is too short")
-        if ticker.startswith("KXMV"):
-            raise KalshiAPIError(f"Invalid market type: {ticker} (KXMV combo/multi-variant markets not supported)")
         
         order_data = {
             "ticker": ticker,

@@ -56,8 +56,9 @@ pytest-asyncio==0.21.1
 
 # Development tools
 black==23.12.1
-isort==5.13.2 
+isort==5.13.2
 uvicorn
 json-repair
+# Streamlit dashboard
 streamlit>=1.32.0
 plotly>=5.17.0

@@ -1031,24 +1031,12 @@ async def create_market_opportunities_from_markets(
 ) -> List[MarketOpportunity]:
     """
     Convert Market objects to MarketOpportunity objects with all required metrics.
+    
+    NOTE: KXMV prefix is now standard for all Kalshi sports markets (NFL, NBA, etc.)
+    We no longer filter by ticker prefix.
     """
     logger = get_trading_logger("portfolio_opportunities")
     opportunities = []
-    
-    # 🚨 CRITICAL FIX: Filter out KXMV/parlay markets BEFORE selecting top markets
-    # Otherwise the top 10 by volume may all be KXMV combo markets that get filtered out
-    filtered_markets = []
-    for m in markets:
-        if m.market_id.startswith("KXMV"):
-            continue
-        if hasattr(m, 'title') and m.title and "PARLAY" in m.title.upper():
-            continue
-        filtered_markets.append(m)
-    
-    if len(filtered_markets) < len(markets):
-        logger.info(f"Filtered {len(markets) - len(filtered_markets)} KXMV/parlay markets before volume ranking")
-    
-    markets = filtered_markets
     
     # Limit markets to prevent excessive AI costs and focus on best opportunities
     # LIMIT: Analyze reasonable number of markets for AI processing
@@ -1068,6 +1056,13 @@ async def create_market_opportunities_from_markets(
             # FIXED: Extract from nested 'market' object (same fix as immediate trading)
             market_info = market_data.get('market', {})
             market_prob = market_info.get('yes_price', 50) / 100
+            
+            # 🚨 CRITICAL FIX: Check market status BEFORE AI analysis to avoid wasting credits
+            # This prevents analyzing markets that are already finalized/closed/settled
+            market_status = market_info.get('status', '')
+            if market_status not in ['active', 'open']:
+                logger.info(f"⏭️ Skipping {market.market_id} - Market status: {market_status} (not tradeable)")
+                continue
             
             # Skip markets with extreme prices (too risky for portfolio)
             if market_prob < 0.05 or market_prob > 0.95:
@@ -1304,18 +1299,13 @@ async def _evaluate_immediate_trade(
         
         logger.info(f"✅ POSITION LIMITS OK FOR IMMEDIATE TRADE: ${initial_position_size:.2f}")
         
-        # Check if we already have a position in this market
-        import aiosqlite
-        async with aiosqlite.connect(db_manager.db_path) as db:
-            cursor = await db.execute(
-                "SELECT COUNT(*) FROM positions WHERE market_id = ?",
-                (opportunity.market_id,)
-            )
-            result = await cursor.fetchone()
-            position_count = result[0] if result else 0
-        
-        if position_count > 0:
-            logger.info(f"⏭️ Skipping immediate trade for {opportunity.market_id} - position already exists")
+        # Check if we already have an open position in this market with the same side
+        # Use the same logic as unified trading system to be consistent
+        side = "NO" if opportunity.edge < 0 else "YES"  # Determine side based on edge direction
+        existing_position = await db_manager.get_position_by_market_and_side(opportunity.market_id, side)
+
+        if existing_position:
+            logger.info(f"⏭️ Skipping immediate trade for {opportunity.market_id} {side} - position already exists")
             return
         
         # 🚀 STRONG OPPORTUNITY - TRADE IMMEDIATELY!
@@ -1354,9 +1344,7 @@ async def _evaluate_immediate_trade(
         logger.info(f"✅ CASH RESERVES APPROVED: ${position_size:.2f} - {reserves_reason}")
         
         # NO DOLLAR MINIMUM - we'll ensure at least 1 contract below
-        
-        # Determine side based on edge direction
-        side = "NO" if opportunity.edge < 0 else "YES"  # Negative edge = market overpriced = bet NO
+        # Note: side was already determined above
         
         # Calculate proper entry price (what we expect to pay)
         if side == "YES":

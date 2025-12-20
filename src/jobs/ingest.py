@@ -24,12 +24,16 @@ async def process_and_queue_markets(
 ):
     """
     Transforms market data, upserts to DB, and puts eligible markets on the queue.
+    
+    NOTE: KXMV prefix is now standard for all Kalshi sports markets (NFL, NBA, etc.)
+    We no longer filter by ticker prefix. Instead, we rely on:
+    - status='active' filter from the API
+    - Category exclusions in settings
     """
     markets_to_upsert = []
+    
     for market_data in markets_data:
-        # Skip unsupported market types (Multi-Variant/Parlays)
-        if market_data["ticker"].startswith("KXMV") or "PARLAY" in market_data.get("title", "").upper():
-            continue
+        ticker = market_data.get("ticker", "")
 
         # A simple approach is to take the average of bid and ask.
         yes_price = (market_data.get("yes_bid", 0) + market_data.get("yes_ask", 0)) / 2
@@ -93,7 +97,7 @@ async def process_and_queue_markets(
             await queue.put(market)
 
     else:
-        logger.info("No new markets to upsert in this batch.")
+        logger.debug("No markets to upsert in this batch (empty after processing)")
 
 
 async def run_ingestion(
@@ -133,6 +137,13 @@ async def run_ingestion(
                 logger.warning(f"Could not find market with ticker: {market_ticker}")
         else:
             logger.info("Fetching all active markets from Kalshi API with pagination.")
+            
+            # 🧹 CRITICAL: Clean up stale/finalized markets BEFORE ingestion
+            # This ensures we don't analyze expired boxing markets from yesterday
+            stale_count = await db_manager.cleanup_stale_markets(max_age_hours=6)
+            if stale_count > 0:
+                logger.info(f"🧹 Cleaned up {stale_count} stale markets before ingestion")
+            
             cursor = None
             while True:
                 response = await kalshi_client.get_markets(limit=100, cursor=cursor)

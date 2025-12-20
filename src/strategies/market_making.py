@@ -522,7 +522,7 @@ class AdvancedMarketMaker:
                     "type_": "limit"
                 }
                 
-                # Add the appropriate price parameter
+                # Add the appropriate price parameter (required for limit orders)
                 if side == "yes":
                     order_params["yes_price"] = int(order.price)  # Price in cents
                 else:
