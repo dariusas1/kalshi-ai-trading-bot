@@ -8,6 +8,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -68,18 +69,36 @@ class KalshiClient(TradingLoggerMixin):
         self.logger.info("Kalshi client initialized", api_key_length=len(self.api_key) if self.api_key else 0)
     
     def _load_private_key(self) -> None:
-        """Load private key from file."""
+        """Load private key from environment variable or file."""
         try:
+            # First try to load from environment variable (for Railway deployment)
+            private_key_env = os.environ.get('KALSHI_PRIVATE_KEY')
+            if private_key_env:
+                # Remove any surrounding whitespace or newlines
+                private_key_env = private_key_env.strip()
+
+                # Convert to bytes
+                private_key_bytes = private_key_env.encode('utf-8')
+
+                # Load private key from environment variable
+                self.private_key = serialization.load_pem_private_key(
+                    private_key_bytes,
+                    password=None
+                )
+                self.logger.info("Private key loaded successfully from environment variable")
+                return
+
+            # Fall back to file-based loading (for local development)
             private_key_path = Path(self.private_key_path)
             if not private_key_path.exists():
                 raise KalshiAPIError(f"Private key file not found: {self.private_key_path}")
-            
+
             with open(private_key_path, 'rb') as f:
                 self.private_key = serialization.load_pem_private_key(
                     f.read(),
                     password=None
                 )
-            self.logger.info("Private key loaded successfully")
+            self.logger.info("Private key loaded successfully from file")
         except Exception as e:
             self.logger.error("Failed to load private key", error=str(e))
             raise KalshiAPIError(f"Failed to load private key: {e}")

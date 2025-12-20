@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
-from ..database.db_manager import DatabaseManager
+from src.database.db_manager import DatabaseManager
 
 # Configure logging
 logging.basicConfig(
