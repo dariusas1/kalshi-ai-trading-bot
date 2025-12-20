@@ -27,7 +27,16 @@ import json
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.utils.database import DatabaseManager
-from src.clients.kalshi_client import KalshiClient
+
+# Check if we're in demo mode (no API keys)
+DEMO_MODE = os.environ.get('DEMO_MODE', 'false').lower() == 'true'
+KALSHI_API_KEY = os.environ.get('KALSHI_API_KEY')
+
+# Only import KalshiClient if we have API keys
+if not DEMO_MODE and KALSHI_API_KEY:
+    from src.clients.kalshi_client import KalshiClient
+else:
+    KalshiClient = None
 
 # Configure Streamlit page
 st.set_page_config(
@@ -78,9 +87,9 @@ def load_performance_data():
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        
+
         db_manager = DatabaseManager()
-        kalshi_client = KalshiClient()
+        kalshi_client = KalshiClient() if KalshiClient else None
         
         async def get_data():
             await db_manager.initialize()
@@ -98,9 +107,13 @@ def load_performance_data():
                     }
             
             # Get LIVE positions from Kalshi API (not just database)
-            positions_response = await kalshi_client.get_positions()
-            kalshi_positions = positions_response.get('market_positions', [])
-            
+            if kalshi_client:
+                positions_response = await kalshi_client.get_positions()
+                kalshi_positions = positions_response.get('market_positions', [])
+            else:
+                # Demo mode - no positions
+                kalshi_positions = []
+
             # Convert Kalshi positions to simple dictionaries for caching
             positions = []
             for pos in kalshi_positions:
@@ -200,14 +213,23 @@ def load_system_health():
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        
-        kalshi_client = KalshiClient()
-        
+
+        kalshi_client = KalshiClient() if KalshiClient else None
+
         async def get_health():
+            if not kalshi_client:
+                # Demo mode - return default values
+                return {
+                    'available_cash': 10000.0,
+                    'total_portfolio_value': 10000.0,
+                    'positions_count': 0,
+                    'position_value': 0.0
+                }
+
             # Get available cash
             balance_response = await kalshi_client.get_balance()
             available_cash = balance_response.get('balance', 0) / 100
-            
+
             # Get current positions to calculate total portfolio value
             positions_response = await kalshi_client.get_positions()
             market_positions = positions_response.get('market_positions', [])
@@ -268,7 +290,13 @@ def load_system_health():
 
 def main():
     """Main dashboard function."""
-    
+
+    # Show demo mode banner if applicable
+    if DEMO_MODE:
+        st.warning("🎭 **Demo Mode**: Running without API keys. Dashboard shows sample data only.")
+        st.info("To enable full functionality, set the `KALSHI_API_KEY` environment variable and restart.")
+        st.markdown("---")
+
     st.title("🚀 Trading System Dashboard")
     st.markdown("**Real-time monitoring and analysis of your automated trading system**")
     
