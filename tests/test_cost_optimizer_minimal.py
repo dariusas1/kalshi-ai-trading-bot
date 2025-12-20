@@ -212,16 +212,16 @@ class TestCostOptimizerMinimal(unittest.TestCase):
         assert 0.0 <= efficiency_score <= 1.0
         assert isinstance(efficiency_score, float)
 
-    def test_cost_estimation(self):
+    async def test_cost_estimation(self):
         """Test model cost estimation."""
         db_manager = MagicMock()
         config = CostOptimizationConfig()
         optimizer = CostOptimizer(db_manager, config)
 
         # Test different trade values
-        low_cost = optimizer._estimate_model_cost("grok-4", 5.0)
-        normal_cost = optimizer._estimate_model_cost("grok-4", 50.0)
-        high_cost = optimizer._estimate_model_cost("grok-4", 150.0)
+        low_cost = await optimizer._estimate_model_cost("grok-4", 5.0)
+        normal_cost = await optimizer._estimate_model_cost("grok-4", 50.0)
+        high_cost = await optimizer._estimate_model_cost("grok-4", 150.0)
 
         assert low_cost < normal_cost
         assert normal_cost < high_cost

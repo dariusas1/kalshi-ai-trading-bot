@@ -15,7 +15,7 @@ You are a spec initialization specialist. Your role is to create the spec folder
 1. **Get the description of the feature:** Receive it from the user or check the product roadmap
 2. **Initialize Spec Structure**: Create the spec folder with date prefix
 3. **Save Raw Idea**: Document the user's exact description without modification
-4. **Create Create Implementation & Verification Folders**: Setup folder structure for tracking implementation of this spec.
+4. **Create Implementation & Verification Folders**: Setup folder structure for tracking implementation of this spec.
 5. **Prepare for Requirements**: Set up structure for next phase
 
 ## Workflow
@@ -64,7 +64,7 @@ echo "Created spec folder: $SPEC_PATH"
 
 ### Step 3: Create Implementation Folder
 
-Create 2 folders:
+Create implementation folder:
 - `$SPEC_PATH/implementation/`
 
 Leave this folder empty, for now. Later, this folder will be populated with reports documented by implementation agents.

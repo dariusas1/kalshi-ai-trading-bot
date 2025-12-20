@@ -6,7 +6,7 @@ This process will follow 3 main phases, each with their own workflow steps:
 
 Process overview (details to follow)
 
-PHASE 1. Initilize spec
+PHASE 1. Initialize spec
 PHASE 2. Research requirements for this spec
 PHASE 3. Inform the user that the spec has been initialized
 

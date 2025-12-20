@@ -367,7 +367,7 @@ async def make_decision_for_market(
             "adjusted_confidence": adjusted_confidence
         }
         await db_manager.record_market_analysis(
-            market.market_id, decision_action, adjusted_confidence, total_analysis_cost, metadata=analysis_metadata
+            market.market_id, decision_action, adjusted_confidence, total_analysis_cost
         )
 
         if decision.action == "BUY" and adjusted_confidence >= settings.trading.min_confidence_to_trade:

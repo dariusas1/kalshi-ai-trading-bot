@@ -245,7 +245,7 @@ class EnsembleEngine(TradingLoggerMixin):
 
         except Exception as e:
             self.logger.error(f"Error in weighted consensus: {e}")
-            return self._create_error_result(e)
+            return self._create_error_result(e, datetime.now())
 
     async def detect_disagreement(
         self,
@@ -547,7 +547,7 @@ class EnsembleEngine(TradingLoggerMixin):
             disagreement_detected=not (action_consensus and side_consensus),
             disagreement_level=0.0 if final_decision else 1.0,
             uncertainty_score=1.0 - avg_confidence if final_decision else 1.0,
-            confidence_level=self._determine_confidence_level(1.0 - (1.0 - avg_confidence) if final_decision else 0.0),
+            confidence_level=self._determine_confidence_level(1.0 - avg_confidence if final_decision else 1.0),
             reasoning=final_decision.reasoning if final_decision else "No consensus reached",
             processing_time_ms=0.0
         )

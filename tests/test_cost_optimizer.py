@@ -8,6 +8,7 @@ intelligent caching, and real-time cost monitoring.
 
 import asyncio
 import unittest
+import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional

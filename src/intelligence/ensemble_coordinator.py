@@ -418,9 +418,9 @@ class EnsembleCoordinator(TradingLoggerMixin):
         try:
             # Collect from performance tracker
             if self._performance_tracker:
-                model_rankings = self._model_selector.get_model_ranking() if self._model_selector else {}
-                for model, ranking in model_rankings.items():
-                    self.state.performance_cache[model] = ranking
+                model_rankings = await self._performance_tracker.get_model_ranking()
+                for metrics in model_rankings:
+                    self.state.performance_cache[metrics.model_name] = metrics.accuracy
 
             # Update statistics
             self.state.statistics["models_consulted"] = len(self.state.model_health_status)

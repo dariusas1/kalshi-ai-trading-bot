@@ -918,15 +918,11 @@ class CostOptimizer(TradingLoggerMixin):
     async def _get_daily_spend(self, date: datetime.date) -> float:
         """Get total spending for a specific date."""
         try:
-            # Calculate from spend history
+            # Calculate from spend history (includes all historical spend)
             daily_spend = 0.0
             for record in self.spend_history:
                 if record["timestamp"].date() == date:
                     daily_spend += record["cost"]
-
-            # Also add current tracked spend for today
-            if date == datetime.now().date():
-                daily_spend += self.daily_spend
 
             return daily_spend
 

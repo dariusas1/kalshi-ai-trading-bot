@@ -23,12 +23,12 @@ def test_cost_optimizer_import():
 
     # Check for required classes
     required_classes = [
-        'class CostOptimizer',
-        'class CostEfficiencyMetrics',
-        'class BudgetStatus',
-        'class CacheEntry',
-        'class DynamicCostModel',
-        'class CostOptimizationConfig'
+        'CostOptimizer',
+        'CostEfficiencyMetrics',
+        'BudgetStatus',
+        'CacheEntry',
+        'DynamicCostModel',
+        'CostOptimizationConfig'
     ]
 
     for class_name in required_classes:
@@ -37,12 +37,12 @@ def test_cost_optimizer_import():
 
     # Check for required methods in CostOptimizer
     required_methods = [
-        'def calculate_cost_efficiency',
-        'def monitor_spend',
-        'def enforce_budget_limits',
-        'def get_cached_result',
-        'def cache_model_result',
-        'def select_models_with_budget'
+        'calculate_cost_efficiency',
+        'monitor_spend',
+        'enforce_budget_limits',
+        'get_cached_result',
+        'cache_model_result',
+        'select_models_with_budget'
     ]
 
     for method_name in required_methods:

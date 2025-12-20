@@ -18,7 +18,7 @@
 ## ✅ Dependencies Verified
 
 - [x] **`requirements.txt` complete** - All necessary dependencies listed
-- [x] **Python 3.13 compatible** - All packages support latest Python version
+- [x] **Python 3.12 compatible** - All packages support deployed Python version
 - [x] **Virtual environment works** - Clean installation possible
 
 ## ✅ Railway-Specific Configurations

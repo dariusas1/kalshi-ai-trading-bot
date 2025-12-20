@@ -13,6 +13,7 @@ Provides abstraction layer for:
 
 import asyncio
 import json
+import logging
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime
@@ -749,8 +750,12 @@ class ProviderManager(TradingLoggerMixin):
         """Close all provider clients."""
         for name, client in self.provider_clients.items():
             try:
-                if hasattr(client, 'close'):
+                if hasattr(client, 'aclose'):
+                    await client.aclose()
+                elif hasattr(client, 'close'):
                     await client.close()
+                elif hasattr(client, 'client') and hasattr(client.client, 'aclose'):
+                    await client.client.aclose()
                 elif hasattr(client, 'client') and hasattr(client.client, 'close'):
                     await client.client.close()
             except Exception as e:

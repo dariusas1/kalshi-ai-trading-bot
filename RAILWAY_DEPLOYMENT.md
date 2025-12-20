@@ -49,10 +49,17 @@ DATABASE_URL=sqlite:///data/trading_system.db
 
 ### Optional: Kalshi Private Key
 ```
-kalshi_private_key="-----BEGIN RSA PRIVATE KEY-----
-[your_private_key_here]
------END RSA PRIVATE KEY-----"
+KALSHI_PRIVATE_KEY="[base64_encoded_private_key]"
 ```
+
+**Important**: The code expects `KALSHI_PRIVATE_KEY` (uppercase) with base64-encoded PEM content. To encode your private key:
+
+```bash
+# Encode your private key to base64 (remove newlines)
+cat kalshi_private_key.pem | base64 -w 0
+```
+
+Then set the encoded string as the environment variable.
 
 ## Deployment Steps
 

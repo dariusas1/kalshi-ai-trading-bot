@@ -325,8 +325,8 @@ class UnifiedAdvancedTradingSystem:
             )
 
             # Log strategy results
-            mm_trades = market_making_results.get('market_making_trades', 0) if market_making_results else 0
-            qf_trades = quick_flip_results.get('quick_flip_trades', 0) if quick_flip_results else 0
+            mm_trades = market_making_results.get('orders_placed', 0) if market_making_results else 0
+            qf_trades = quick_flip_results.get('positions_created', 0) if quick_flip_results else 0
             pa_allocations = len(portfolio_allocation.allocations) if portfolio_allocation and portfolio_allocation.allocations else 0
 
             self.logger.info(f"📊 STRATEGY RESULTS:")
@@ -451,8 +451,8 @@ class UnifiedAdvancedTradingSystem:
             allocation = await self.portfolio_optimizer.optimize_portfolio(opportunities)
 
             self.logger.info(f"📊 PORTFOLIO OPTIMIZATION: {len(allocation.allocations) if allocation else 0} allocations created")
-            if allocation and allocation.allocations:
-                total_allocation = sum(pos.count * pos.entry_price for pos in allocation.allocations)
+            if allocation and allocation.total_capital_used:
+                total_allocation = allocation.total_capital_used
                 self.logger.info(f"💰 TOTAL ALLOCATION: ${total_allocation:.2f} out of ${self.directional_capital:.2f}")
 
             # Restore original capital setting

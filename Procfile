@@ -1,1 +1,1 @@
-web: python beast_mode_bot.py
+web: ./start_railway.sh

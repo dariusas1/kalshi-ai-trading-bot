@@ -23,7 +23,7 @@ Once you have `spec.md` AND/OR `requirements.md`, use the **tasks-list-creator**
 Provide the tasks-list-creator:
 - `agent-os/specs/[this-spec]/spec.md` (if present)
 - `agent-os/specs/[this-spec]/planning/requirements.md` (if present)
-- `agent-os/specs/[this-spec]/planning/visuals/` and its' contents (if present)
+- `agent-os/specs/[this-spec]/planning/visuals/` and its contents (if present)
 
 The tasks-list-creator will create `tasks.md` inside the spec folder.
 

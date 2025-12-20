@@ -48,7 +48,7 @@ def main():
     print("🔍 Simple Validation of Enhanced Fallback and Redundancy Systems")
     print("=" * 65)
 
-    base_path = Path("/Users/darius/Documents/1-Active-Projects/Personal-Apps/kalshi-ai-trading-bot")
+    base_path = Path.cwd()  # Use current working directory instead of hardcoded path
 
     # Check files exist and are valid
     files = [

@@ -778,7 +778,7 @@ Provide a brief, factual summary under {max_length//2} words. If no current info
         try:
             from src.utils.performance_tracker import PerformanceTracker
             from src.intelligence.model_selector import ModelSelector
-            from src.intelligence.ensemble_engine import EnsembleConfig
+            from src.intelligence.ensemble_engine import EnsembleConfig, EnsembleEngine
 
             # Create performance tracker
             self._performance_tracker = PerformanceTracker(self.db_manager)

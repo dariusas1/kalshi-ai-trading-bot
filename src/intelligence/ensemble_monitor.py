@@ -864,7 +864,8 @@ class EnsembleMonitor(TradingLoggerMixin):
         previous_24h = hourly_metrics[24:48] if len(hourly_metrics) >= 48 else []
 
         # Calculate recent performance
-        recent_success_rate = sum(h['success_rate'] for h in recent_24h if h['decisions_count'] > 0) / len([h for h in recent_24h if h['decisions_count'] > 0])
+        recent_hours_with_decisions = [h for h in recent_24h if h['decisions_count'] > 0]
+        recent_success_rate = sum(h['success_rate'] for h in recent_hours_with_decisions) / len(recent_hours_with_decisions) if recent_hours_with_decisions else 0.0
 
         # Calculate trend
         if previous_24h:

@@ -1672,7 +1672,7 @@ class DatabaseManager(TradingLoggerMixin):
             self.logger.error(f"Error saving model performance: {e}")
             return None
 
-    async def get_model_performance(self, record_id: int) -> Optional[ModelPerformance]:
+    async def get_model_performance_by_id(self, record_id: int) -> Optional[ModelPerformance]:
         """Get a model performance record by ID."""
         try:
             async with aiosqlite.connect(self.db_path) as db:
