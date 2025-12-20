@@ -73,12 +73,23 @@ class KalshiClient(TradingLoggerMixin):
         try:
             # First try to load from environment variable (for Railway deployment)
             private_key_env = os.environ.get('KALSHI_PRIVATE_KEY')
+            self.logger.info(f"Checking for KALSHI_PRIVATE_KEY environment variable...")
+            self.logger.info(f"KALSHI_PRIVATE_KEY exists: {bool(private_key_env)}")
+
             if private_key_env:
+                self.logger.info(f"KALSHI_PRIVATE_KEY found, length: {len(private_key_env)}")
+
                 # Remove any surrounding whitespace or newlines
                 private_key_env = private_key_env.strip()
 
+                # Check if it looks like a PEM key
+                if not private_key_env.startswith('-----BEGIN PRIVATE KEY-----'):
+                    self.logger.error("KALSHI_PRIVATE_KEY does not appear to be in PEM format")
+                    raise KalshiAPIError("KALSHI_PRIVATE_KEY is not in valid PEM format")
+
                 # Convert to bytes
                 private_key_bytes = private_key_env.encode('utf-8')
+                self.logger.info(f"Private key converted to bytes, length: {len(private_key_bytes)}")
 
                 # Load private key from environment variable
                 self.private_key = serialization.load_pem_private_key(
@@ -411,13 +422,11 @@ class KalshiClient(TradingLoggerMixin):
         Returns:
             Order response
         """
-        # 🚨 CRITICAL: Validate ticker before sending to API
+        # Validate ticker before sending to API
         if not ticker or not ticker.strip():
             raise KalshiAPIError("Invalid ticker: ticker cannot be empty")
         if len(ticker) < 5:
             raise KalshiAPIError(f"Invalid ticker: {ticker} is too short")
-        if ticker.startswith("KXMV"):
-            raise KalshiAPIError(f"Invalid market type: {ticker} (KXMV combo/multi-variant markets not supported)")
         
         order_data = {
             "ticker": ticker,

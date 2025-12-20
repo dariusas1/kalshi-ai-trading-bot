@@ -469,10 +469,10 @@ class AdvancedMarketMaker:
                     "side": side,
                     "action": "buy",  # Market making involves buying at our bid prices
                     "count": order.quantity,
-                    "type": "limit"
+                    "type_": "limit"  # FIXED: use type_ not type
                 }
                 
-                # Add the appropriate price parameter
+                # Add the appropriate price parameter (required for limit orders)
                 if side == "yes":
                     order_params["yes_price"] = int(order.price)  # Price in cents
                 else:

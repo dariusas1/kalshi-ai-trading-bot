@@ -236,11 +236,6 @@ async def run_tracking(db_manager: Optional[DatabaseManager] = None):
         exits_executed = 0
         for position in open_positions:
             try:
-                # 🚨 CRITICAL: Skip KXMV combo markets (shouldn't exist but safety check)
-                if position.market_id.startswith("KXMV"):
-                    logger.warning(f"⚠️ Found KXMV position {position.market_id} - marking as cancelled")
-                    await db_manager.update_position_status(position.id, 'cancelled')
-                    continue
                 
                 # Get current market data
                 market_response = await kalshi_client.get_market(position.market_id)

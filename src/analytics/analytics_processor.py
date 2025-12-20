@@ -7,11 +7,20 @@ Processes and analyzes trading data for insights and optimization
 import asyncio
 import logging
 import os
+import sys
 import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
-from src.database.db_manager import DatabaseManager
+# Add app root to path for imports
+sys.path.append('/app')
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+try:
+    from src.database.db_manager import DatabaseManager
+except ImportError:
+    # Fallback for different path structures
+    from database.db_manager import DatabaseManager
 
 # Configure logging
 logging.basicConfig(

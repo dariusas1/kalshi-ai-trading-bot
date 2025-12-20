@@ -298,17 +298,31 @@ class RiskManager:
             live_mode = getattr(settings.trading, 'live_trading_enabled', False)
             
             if live_mode:
-                # Place market sell order
+                # 🚨 Validate ticker before placing order
+                if not position.market_id or len(position.market_id) < 5:
+                    self.logger.error(f"❌ Invalid ticker: {position.market_id}")
+                    return False
+                
+                # Place market sell order  
                 order_id = str(uuid.uuid4())
                 
-                response = await self.kalshi_client.place_order(
-                    ticker=position.market_id,
-                    client_order_id=order_id,
-                    side=position.side.lower(),
-                    action="sell",
-                    count=position.quantity,
-                    type_="market"
-                )
+                # Build order params with required price
+                order_params = {
+                    "ticker": position.market_id,
+                    "client_order_id": order_id,
+                    "side": position.side.lower(),
+                    "action": "sell",
+                    "count": position.quantity,
+                    "type_": "market"
+                }
+                
+                # Add required price for market order
+                if position.side.lower() == "yes":
+                    order_params["yes_price"] = 1  # Sell at any price (1 cent minimum)
+                else:
+                    order_params["no_price"] = 1
+                
+                response = await self.kalshi_client.place_order(**order_params)
                 
                 if response and 'order' in response:
                     self.logger.info(f"✅ Risk closure order placed: {position.market_id}")
@@ -354,17 +368,31 @@ class RiskManager:
             live_mode = getattr(settings.trading, 'live_trading_enabled', False)
             
             if live_mode:
+                # 🚨 Validate ticker before placing order
+                if not position.market_id or len(position.market_id) < 5:
+                    self.logger.error(f"❌ Invalid ticker for partial sell: {position.market_id}")
+                    return 0.0
+                
                 # Place market sell order for partial quantity
                 order_id = str(uuid.uuid4())
                 
-                response = await self.kalshi_client.place_order(
-                    ticker=position.market_id,
-                    client_order_id=order_id,
-                    side=position.side.lower(),
-                    action="sell",
-                    count=contracts_to_sell,
-                    type_="market"
-                )
+                # Build order params with required price
+                order_params = {
+                    "ticker": position.market_id,
+                    "client_order_id": order_id,
+                    "side": position.side.lower(),
+                    "action": "sell",
+                    "count": contracts_to_sell,
+                    "type_": "market"
+                }
+                
+                # Add required price for market order
+                if position.side.lower() == "yes":
+                    order_params["yes_price"] = 1  # Sell at any price
+                else:
+                    order_params["no_price"] = 1
+                
+                response = await self.kalshi_client.place_order(**order_params)
                 
                 if response and 'order' in response:
                     sold_value = contracts_to_sell * position.entry_price

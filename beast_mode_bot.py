@@ -196,7 +196,13 @@ class BeastModeBot:
                 self.logger.info(f"🔄 Starting Beast Mode Trading Cycle #{cycle_count}")
                 
                 # Run the Beast Mode unified trading system
-                results = await run_trading_job()
+                # 🔒 CRITICAL FIX: Pass shared clients to ensure daily AI cost tracking works correctly
+                # Previously, run_trading_job() created its own XAIClient, bypassing the cost limiter
+                results = await run_trading_job(
+                    xai_client=xai_client,
+                    db_manager=db_manager,
+                    kalshi_client=kalshi_client
+                )
                 
                 if results and results.total_positions > 0:
                     self.logger.info(

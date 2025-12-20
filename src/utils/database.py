@@ -355,30 +355,46 @@ class DatabaseManager(TradingLoggerMixin):
             cursor = await db.execute("PRAGMA table_info(positions)")
             columns = await cursor.fetchall()
             column_names = [col[1] for col in columns]
-            
+
             # Add missing columns for enhanced exit strategy
             if 'stop_loss_price' not in column_names:
                 await db.execute("ALTER TABLE positions ADD COLUMN stop_loss_price REAL")
                 self.logger.info("Added stop_loss_price column to positions table")
-                
+
             if 'take_profit_price' not in column_names:
                 await db.execute("ALTER TABLE positions ADD COLUMN take_profit_price REAL")
                 self.logger.info("Added take_profit_price column to positions table")
-                
+
             if 'max_hold_hours' not in column_names:
                 await db.execute("ALTER TABLE positions ADD COLUMN max_hold_hours INTEGER")
                 self.logger.info("Added max_hold_hours column to positions table")
-                
+
             if 'target_confidence_change' not in column_names:
                 await db.execute("ALTER TABLE positions ADD COLUMN target_confidence_change REAL")
                 self.logger.info("Added target_confidence_change column to positions table")
-                
+
             if 'trailing_stop_price' not in column_names:
                 await db.execute("ALTER TABLE positions ADD COLUMN trailing_stop_price REAL")
                 self.logger.info("Added trailing_stop_price column to positions table")
-                
+
+            # Migration: Add unique constraint with status to prevent constraint violations
+            # when trying to create new positions for markets that only have closed positions
+            cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='index' AND name='positions_open_unique'")
+            open_index_exists = await cursor.fetchone()
+
+            if not open_index_exists:
+                # Create a unique index that allows same market+side with different statuses
+                # but prevents duplicate open positions
+                try:
+                    await db.execute("CREATE UNIQUE INDEX positions_open_unique ON positions(market_id, side, status)")
+                    self.logger.info("Added unique index with status to prevent constraint violations")
+                except Exception as e:
+                    # If the index creation fails due to existing constraint conflicts,
+                    # we'll handle it in the add_position method
+                    self.logger.warning(f"Could not create positions_open_unique index: {e}")
+
             await db.commit()
-            
+
         except Exception as e:
             self.logger.error(f"Error running migrations: {e}")
 
@@ -415,6 +431,45 @@ class DatabaseManager(TradingLoggerMixin):
             """, market_dicts)
             await db.commit()
             self.logger.info(f"Upserted {len(markets)} markets.")
+
+    async def cleanup_stale_markets(self, max_age_hours: int = 24) -> int:
+        """
+        Remove stale markets from the database that:
+        1. Have expired (expiration_ts < now), OR
+        2. Haven't been updated in max_age_hours, OR
+        3. Have status other than 'active'
+        
+        This prevents the database from being cluttered with finalized markets.
+        
+        Returns:
+            Number of markets removed.
+        """
+        now_ts = int(datetime.now().timestamp())
+        cutoff_time = (datetime.now() - timedelta(hours=max_age_hours)).isoformat()
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            # Get count before deletion for logging
+            cursor = await db.execute("""
+                SELECT COUNT(*) FROM markets WHERE 
+                    expiration_ts < ? OR 
+                    last_updated < ? OR
+                    status != 'active'
+            """, (now_ts, cutoff_time))
+            count_row = await cursor.fetchone()
+            count_to_delete = count_row[0] if count_row else 0
+            
+            if count_to_delete > 0:
+                # Delete stale markets
+                await db.execute("""
+                    DELETE FROM markets WHERE 
+                        expiration_ts < ? OR 
+                        last_updated < ? OR
+                        status != 'active'
+                """, (now_ts, cutoff_time))
+                await db.commit()
+                self.logger.info(f"🧹 Cleaned up {count_to_delete} stale/expired markets from database")
+            
+            return count_to_delete
 
     async def get_eligible_markets(self, volume_min: int, max_days_to_expiry: int) -> List[Market]:
         """
@@ -978,10 +1033,10 @@ class DatabaseManager(TradingLoggerMixin):
     async def add_position(self, position: Position) -> Optional[int]:
         """
         Adds a new position to the database, if one doesn't already exist for the same market and side.
-        
+
         Args:
             position: The position to add.
-        
+
         Returns:
             The ID of the newly inserted position, or None if a position already exists.
         """
@@ -995,18 +1050,57 @@ class DatabaseManager(TradingLoggerMixin):
             # aiosqlite does not support dataclasses with datetime objects
             position_dict['timestamp'] = position.timestamp.isoformat()
 
-            cursor = await db.execute("""
-                INSERT INTO positions (market_id, side, entry_price, quantity, timestamp, rationale, confidence, live, status, strategy, stop_loss_price, take_profit_price, max_hold_hours, target_confidence_change, trailing_stop_price)
-                VALUES (:market_id, :side, :entry_price, :quantity, :timestamp, :rationale, :confidence, :live, :status, :strategy, :stop_loss_price, :take_profit_price, :max_hold_hours, :target_confidence_change, :trailing_stop_price)
-            """, position_dict)
-            await db.commit()
-            
-            # Set has_position to True for the market
-            await db.execute("UPDATE markets SET has_position = 1 WHERE market_id = ?", (position.market_id,))
-            await db.commit()
+            try:
+                cursor = await db.execute("""
+                    INSERT INTO positions (market_id, side, entry_price, quantity, timestamp, rationale, confidence, live, status, strategy, stop_loss_price, take_profit_price, max_hold_hours, target_confidence_change, trailing_stop_price)
+                    VALUES (:market_id, :side, :entry_price, :quantity, :timestamp, :rationale, :confidence, :live, :status, :strategy, :stop_loss_price, :take_profit_price, :max_hold_hours, :target_confidence_change, :trailing_stop_price)
+                """, position_dict)
+                await db.commit()
 
-            self.logger.info(f"Added position for market {position.market_id}", position_id=cursor.lastrowid)
-            return cursor.lastrowid
+                # Set has_position to True for the market
+                await db.execute("UPDATE markets SET has_position = 1 WHERE market_id = ?", (position.market_id,))
+                await db.commit()
+
+                self.logger.info(f"Added position for market {position.market_id}", position_id=cursor.lastrowid)
+                return cursor.lastrowid
+
+            except Exception as e:
+                # Handle constraint violation - this happens when there's a UNIQUE(market_id, side) constraint
+                # but the existing position has a different status (e.g., closed)
+                error_str = str(e).lower()
+                if "unique constraint" in error_str or "constraint" in error_str:
+                    # Check if the existing position is closed, and if so, update it to open
+                    cursor = await db.execute("""
+                        SELECT id, status FROM positions WHERE market_id = ? AND side = ? LIMIT 1
+                    """, (position.market_id, position.side))
+                    row = await cursor.fetchone()
+
+                    if row and row[1] == 'closed':
+                        # Update the closed position to open with new details
+                        position_dict['id'] = row[0]  # Use existing ID
+                        await db.execute("""
+                            UPDATE positions
+                            SET entry_price = :entry_price, quantity = :quantity, timestamp = :timestamp,
+                                rationale = :rationale, confidence = :confidence, live = :live,
+                                status = 'open', strategy = :strategy, stop_loss_price = :stop_loss_price,
+                                take_profit_price = :take_profit_price, max_hold_hours = :max_hold_hours,
+                                target_confidence_change = :target_confidence_change, trailing_stop_price = :trailing_stop_price
+                            WHERE id = :id
+                        """, position_dict)
+                        await db.commit()
+
+                        # Set has_position to True for the market
+                        await db.execute("UPDATE markets SET has_position = 1 WHERE market_id = ?", (position.market_id,))
+                        await db.commit()
+
+                        self.logger.info(f"Reactivated closed position for market {position.market_id}", position_id=row[0])
+                        return row[0]
+                    else:
+                        self.logger.warning(f"Position constraint violation for {position.market_id} {position.side}: {e}")
+                        return None
+                else:
+                    # Re-raise the exception if it's not a constraint violation
+                    raise
 
     async def get_open_positions(self) -> List[Position]:
         """Get all open positions."""

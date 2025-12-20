@@ -41,11 +41,7 @@ async def execute_position(
     logger = get_trading_logger("trade_execution")
     logger.info(f"Executing position for market: {position.market_id}")
 
-    # 🚨 CRITICAL: Validate ticker before execution
-    if position.market_id.startswith("KXMV"):
-        logger.error(f"❌ BLOCKED: Cannot execute on KXMV combo market: {position.market_id}")
-        return False
-    
+    # Validate ticker (KXMV is now standard for all sports markets)
     if not position.market_id or len(position.market_id) < 5:
         logger.error(f"❌ BLOCKED: Invalid market_id: {position.market_id}")
         return False

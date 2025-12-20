@@ -38,12 +38,22 @@ from src.jobs.decide import make_decision_for_market
 from src.jobs.execute import execute_position
 
 
-async def run_trading_job() -> Optional[TradingSystemResults]:
+async def run_trading_job(
+    xai_client: Optional[XAIClient] = None,
+    db_manager: Optional[DatabaseManager] = None,
+    kalshi_client: Optional[KalshiClient] = None
+) -> Optional[TradingSystemResults]:
     """
     Enhanced trading job using the Unified Advanced Trading System.
     
     This replaces the old sequential approach (decide -> execute) with
     a sophisticated multi-strategy system that maximizes capital efficiency.
+    
+    Args:
+        xai_client: Optional shared XAIClient instance. If provided, uses this
+                    to maintain consistent daily cost tracking across the app.
+        db_manager: Optional shared DatabaseManager instance.
+        kalshi_client: Optional shared KalshiClient instance.
     
     Process:
     1. Unified strategy analysis across ALL markets (no time limits!)
@@ -57,10 +67,10 @@ async def run_trading_job() -> Optional[TradingSystemResults]:
     try:
         logger.info("🚀 Starting Enhanced Trading Job - Beast Mode Activated!")
         
-        # Initialize clients
-        db_manager = DatabaseManager()
-        kalshi_client = KalshiClient()
-        xai_client = XAIClient(db_manager=db_manager, kalshi_client=kalshi_client)  # Pass db_manager for LLM logging, kalshi_client for ML predictions
+        # Use provided clients or create new ones
+        db_manager = db_manager or DatabaseManager()
+        kalshi_client = kalshi_client or KalshiClient()
+        xai_client = xai_client or XAIClient(db_manager=db_manager, kalshi_client=kalshi_client)  # Pass db_manager for LLM logging, kalshi_client for ML predictions
         
         # Configure the unified system
         # Use settings from TradingConfig

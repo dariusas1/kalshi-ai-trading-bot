@@ -27,7 +27,7 @@ if [ "$DEMO_MODE" = false ]; then
     echo "🤖 Starting trading bot in background..."
 
     # Check if trading bot can start (has all dependencies)
-    if python -c "from beast_mode_dashboard import BeastModeDashboard; print('Dependencies OK')" 2>/dev/null; then
+    if python -c "import sys; sys.path.append('/app'); from beast_mode_dashboard import BeastModeDashboard; print('Dependencies OK')" 2>/dev/null; then
         python beast_mode_bot.py &
         BOT_PID=$!
         echo "✅ Trading bot started (PID: $BOT_PID)"
@@ -42,10 +42,24 @@ if [ "$DEMO_MODE" = false ]; then
         python src/analytics/analytics_processor.py &
         ANALYTICS_PID=$!
         echo "✅ Analytics processor started (PID: $ANALYTICS_PID)"
+
+        # Give analytics a moment to start and check if it's running
+        sleep 2
+        if ! kill -0 $ANALYTICS_PID 2>/dev/null; then
+            echo "⚠️  Analytics processor failed to start - continuing without it"
+            ANALYTICS_PID=""
+        fi
     else
         echo "⚠️  Analytics processor not found - skipping"
         ANALYTICS_PID=""
     fi
+
+    # Summary of started processes
+    echo ""
+    echo "📋 Background Processes Status:"
+    echo "   Trading Bot: ${BOT_PID:+Running (PID: $BOT_PID)}"
+    echo "   Analytics: ${ANALYTICS_PID:+Running (PID: $ANALYTICS_PID)}"
+    echo ""
 else
     echo "🎭 Demo mode: Skipping background processes"
 fi
