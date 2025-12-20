@@ -93,4 +93,33 @@ async def get_test_market_data(market_id: str) -> Optional[Dict[str, Any]]:
 def clear_markets_cache():
     """Clear the markets cache for fresh data."""
     global _MARKETS_CACHE
-    _MARKETS_CACHE = None 
+    _MARKETS_CACHE = None
+
+def create_test_market_data():
+    """Create mock market data for testing."""
+    return {
+        "market_id": "TEST_MARKET_001",
+        "title": "Test Market for Ensemble Methods",
+        "category": "technology",
+        "yes_price": 0.65,
+        "no_price": 0.35,
+        "volume": 1000,
+        "expiration_ts": 1735000000,  # Mock timestamp
+        "status": "active"
+    }
+
+def create_test_portfolio_data():
+    """Create mock portfolio data for testing."""
+    return {
+        "total_value": 5000.0,
+        "available_cash": 2500.0,
+        "positions": [
+            {
+                "market_id": "TEST_POSITION_001",
+                "side": "YES",
+                "quantity": 10,
+                "entry_price": 0.60
+            }
+        ],
+        "risk_score": 0.3
+    } 

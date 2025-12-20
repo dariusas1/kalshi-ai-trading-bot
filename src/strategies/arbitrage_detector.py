@@ -91,8 +91,12 @@ class ArbitrageDetector:
             opportunities.extend(spread_opps)
             
             # 2. Find correlated market arbitrage
-            correlated_opps = await self.find_correlated_arbitrage(markets)
-            opportunities.extend(correlated_opps)
+            correlated_opps = []
+            if settings.trading.cross_market_arbitrage:
+                correlated_opps = await self.find_correlated_arbitrage(markets)
+                opportunities.extend(correlated_opps)
+            else:
+                self.logger.info("Cross-market arbitrage disabled; skipping correlated arbitrage scan")
             
             # Sort by expected profit
             opportunities.sort(key=lambda x: x.expected_profit, reverse=True)
@@ -358,19 +362,28 @@ class ArbitrageDetector:
                 results['leg2_executed'] = True
                 return results
             
-            # Execute leg 1
+            buffer_cents = getattr(settings.trading, "market_order_price_buffer_cents", 2)
+
+            # Execute leg 1 (IOC to avoid partial exposure)
             order1_params = {
                 "ticker": opportunity.market_id_1,
                 "client_order_id": str(uuid.uuid4()),
                 "side": opportunity.side_1.lower(),
                 "action": "buy",
                 "count": opportunity.quantity,
-                "type_": "market"
+                "type_": "market",
+                "time_in_force": "immediate_or_cancel"
             }
+            if opportunity.side_1.lower() == "yes":
+                order1_params["yes_price"] = min(99, int(opportunity.price_1 * 100 + buffer_cents))
+            else:
+                order1_params["no_price"] = min(99, int(opportunity.price_1 * 100 + buffer_cents))
             
             response1 = await self.kalshi_client.place_order(**order1_params)
             
-            if response1 and 'order' in response1:
+            order1 = response1.get('order', {}) if response1 else {}
+            order1_status = order1.get('status')
+            if order1_status in ['filled', 'executed']:
                 results['leg1_executed'] = True
                 results['total_cost'] += opportunity.price_1 * opportunity.quantity
                 
@@ -389,12 +402,19 @@ class ArbitrageDetector:
                 "side": opportunity.side_2.lower(),
                 "action": "buy",
                 "count": opportunity.quantity,
-                "type_": "market"
+                "type_": "market",
+                "time_in_force": "immediate_or_cancel"
             }
+            if opportunity.side_2.lower() == "yes":
+                order2_params["yes_price"] = min(99, int(opportunity.price_2 * 100 + buffer_cents))
+            else:
+                order2_params["no_price"] = min(99, int(opportunity.price_2 * 100 + buffer_cents))
             
             response2 = await self.kalshi_client.place_order(**order2_params)
             
-            if response2 and 'order' in response2:
+            order2 = response2.get('order', {}) if response2 else {}
+            order2_status = order2.get('status')
+            if order2_status in ['filled', 'executed']:
                 results['leg2_executed'] = True
                 results['total_cost'] += opportunity.price_2 * opportunity.quantity
                 results['success'] = True
@@ -408,17 +428,53 @@ class ArbitrageDetector:
                 )
             else:
                 self.logger.error(f"❌ ARB LEG 2 FAILED: {response2}")
-                # Leg 1 executed but leg 2 failed - this is bad, log warning
-                self.logger.warning(
-                    f"⚠️ UNHEDGED POSITION: Leg 1 executed but leg 2 failed for "
-                    f"{opportunity.market_id_1}"
-                )
+                await self._attempt_arb_hedge(opportunity, buffer_cents)
             
             return results
             
         except Exception as e:
             self.logger.error(f"Error executing arbitrage trade: {e}")
             return results
+
+    async def _attempt_arb_hedge(self, opportunity: ArbitrageOpportunity, buffer_cents: int) -> None:
+        """Attempt to neutralize exposure if the second leg fails."""
+        try:
+            import uuid
+
+            hedge_action = {
+                "ticker": opportunity.market_id_1,
+                "client_order_id": str(uuid.uuid4()),
+                "side": opportunity.side_1.lower(),
+                "action": "sell",
+                "count": opportunity.quantity,
+                "type_": "market",
+                "time_in_force": "immediate_or_cancel"
+            }
+            if opportunity.side_1.lower() == "yes":
+                hedge_action["yes_price"] = max(1, int(opportunity.price_1 * 100 - buffer_cents))
+            else:
+                hedge_action["no_price"] = max(1, int(opportunity.price_1 * 100 - buffer_cents))
+
+            hedge_response = await self.kalshi_client.place_order(**hedge_action)
+            hedge_order = hedge_response.get('order', {}) if hedge_response else {}
+            hedge_status = hedge_order.get('status')
+            if hedge_status in ['filled', 'executed']:
+                self.logger.warning(
+                    "⚠️ Hedge executed to neutralize failed arbitrage leg",
+                    market_id=opportunity.market_id_1,
+                    side=opportunity.side_1,
+                    quantity=opportunity.quantity
+                )
+            else:
+                self.logger.error(
+                    "❌ Hedge failed; manual review required",
+                    market_id=opportunity.market_id_1,
+                    side=opportunity.side_1,
+                    quantity=opportunity.quantity,
+                    response=hedge_response
+                )
+        except Exception as e:
+            self.logger.error(f"Error attempting arbitrage hedge: {e}")
     
     def get_arbitrage_summary(
         self, 

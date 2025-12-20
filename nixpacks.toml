@@ -1,0 +1,10 @@
+[phases.setup]
+nixPkgs = ["python312"]
+
+[phases.install]
+cmds = [
+  "python -m venv /opt/venv && source /opt/venv/bin/activate && pip install --upgrade pip && pip install -r requirements.txt"
+]
+
+[start]
+cmd = "source /opt/venv/bin/activate && python beast_mode_bot.py"

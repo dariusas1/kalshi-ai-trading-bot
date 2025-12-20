@@ -34,19 +34,19 @@ class EdgeFilter:
     UPDATED: More aggressive thresholds to allow more trading opportunities.
     """
     
-    # DECREASED: More permissive edge requirements for more trades
-    MIN_EDGE_REQUIREMENT = 0.08        # DECREASED: 8% minimum edge (was 15%)
-    HIGH_CONFIDENCE_EDGE = 0.06        # DECREASED: 6% edge for high confidence (was 12%)  
-    MEDIUM_CONFIDENCE_EDGE = 0.08      # DECREASED: 8% edge for medium confidence (was 15%)
-    LOW_CONFIDENCE_EDGE = 0.12         # DECREASED: 12% edge for low confidence (was 20%)
-    
-    # DECREASED: More permissive filters for more opportunities
-    MIN_CONFIDENCE_FOR_TRADE = 0.50    # DECREASED: 50% minimum confidence (was 65%)
-    MAX_ACCEPTABLE_RISK = 0.6          # INCREASED: 60% max position risk (was 50%)
-    
-    # UPDATED: More permissive quality filters
-    MIN_VOLUME_FOR_HIGH_EDGE = 500     # DECREASED: Lower volume requirement (was 2000, now 500)
-    MIN_SPREAD_QUALITY = 0.03          # INCREASED: Allow wider spreads (was 0.02, now 0.03)
+    # CONSERVATIVE: Require substantial edge for trading
+    MIN_EDGE_REQUIREMENT = 0.08       # RESTORED: 8% minimum edge
+    HIGH_CONFIDENCE_EDGE = 0.05       # RESTORED: 5% edge for high confidence
+    MEDIUM_CONFIDENCE_EDGE = 0.10     # RESTORED: 10% edge for medium confidence
+    LOW_CONFIDENCE_EDGE = 0.15         # RESTORED: 15% edge for low confidence
+
+    # STRICT: High confidence threshold for quality trades
+    MIN_CONFIDENCE_FOR_TRADE = 0.50    # RESTORED: 50% minimum confidence
+    MAX_ACCEPTABLE_RISK = 0.5          # RESTORED: 50% max position risk
+
+    # QUALITY: Maintain high standards for market quality
+    MIN_VOLUME_FOR_HIGH_EDGE = 2000    # RESTORED: Higher volume requirement
+    MIN_SPREAD_QUALITY = 0.02          # RESTORED: Tighter spread requirements
     
     @classmethod
     def calculate_edge(
@@ -76,6 +76,11 @@ class EdgeFilter:
         edge_magnitude = ai_probability - market_probability
         edge_percentage = abs(edge_magnitude)
         
+        # ⚖️ BIAS CORRECTION: LLMs can be overly negative/conservative
+        # Penalize NO edges to ensure we only take really strong NO positions
+        if edge_magnitude < 0:
+            edge_percentage *= 0.8  # 20% penalty for NO bets (requires stronger signal)
+        
         # Determine position side based on edge direction
         if edge_magnitude > 0:
             side = "YES"  # AI thinks YES is underpriced
@@ -89,13 +94,22 @@ class EdgeFilter:
             required_edge = cls.MEDIUM_CONFIDENCE_EDGE   # 10% for medium confidence
         else:
             required_edge = cls.LOW_CONFIDENCE_EDGE      # 15% for low confidence
+
+        # Settings-driven overrides
+        try:
+            from src.config.settings import settings
+            min_confidence = getattr(settings.trading, "min_confidence_threshold", cls.MIN_CONFIDENCE_FOR_TRADE)
+            min_edge = getattr(settings.trading, "min_trade_edge", cls.MIN_EDGE_REQUIREMENT)
+            required_edge = max(required_edge, min_edge)
+        except Exception:
+            min_confidence = cls.MIN_CONFIDENCE_FOR_TRADE
         
         # Calculate confidence-adjusted edge
         confidence_adjusted_edge = edge_percentage * confidence
         
         # Check if edge meets requirements (use > instead of >= to avoid floating point precision issues)
         passes_basic_edge = edge_percentage > (required_edge - 0.001)  # Allow tiny tolerance for floating point
-        passes_confidence = confidence >= cls.MIN_CONFIDENCE_FOR_TRADE
+        passes_confidence = confidence >= min_confidence
         
         # Generate filtering decision and reason
         if not passes_confidence:
@@ -191,9 +205,20 @@ class EdgeFilter:
         if additional_filters:
             volume = additional_filters.get('volume', 0)
             min_volume = additional_filters.get('min_volume', 1000)
+            time_to_expiry = additional_filters.get('time_to_expiry_days', 0)
+            max_time_to_expiry = additional_filters.get('max_time_to_expiry', 14)
             
             if volume < min_volume:
                 return False, f"Volume {volume} below minimum {min_volume}", edge_result
+
+            try:
+                from src.config.settings import settings
+                long_term_min_conf = settings.trading.min_confidence_long_term
+            except Exception:
+                long_term_min_conf = cls.MIN_CONFIDENCE_FOR_TRADE
+
+            if time_to_expiry > max_time_to_expiry and confidence < long_term_min_conf:
+                return False, f"Long-term market confidence {confidence:.1%} below {long_term_min_conf:.1%}", edge_result
             
             time_to_expiry = additional_filters.get('time_to_expiry_days', 30)
             max_time = additional_filters.get('max_time_to_expiry', 365)

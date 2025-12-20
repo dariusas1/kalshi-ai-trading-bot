@@ -204,4 +204,9 @@ dashboard_*.json
 # API keys and credentials
 api_keys.txt
 credentials.json
-secrets.yaml 
+secrets.yaml
+
+# Claude Flow runtime metrics and session data
+.claude-flow/metrics/
+.claude-flow/sessions/
+.claude-flow/state/ 

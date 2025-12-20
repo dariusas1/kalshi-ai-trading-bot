@@ -70,7 +70,7 @@ async def process_and_queue_markets(
         category_handler = get_category_handler()
 
         # Primary filtering criteria
-        min_volume: float = 100.0  # Baseline
+        min_volume: float = settings.trading.min_volume_for_analysis  # Baseline
         
         eligible_markets = []
         for m in markets_to_upsert:
@@ -83,8 +83,11 @@ async def process_and_queue_markets(
             
             if m.volume >= adjusted_min_volume:
                 # Check category filters from settings
-                if (not settings.trading.preferred_categories or m.category in settings.trading.preferred_categories) and \
-                   (m.category not in settings.trading.excluded_categories):
+                if (
+                    (not settings.trading.preferred_categories or m.category in settings.trading.preferred_categories)
+                    and (m.category not in settings.trading.excluded_categories)
+                    and (m.category not in settings.trading.category_blacklist)
+                ):
                     eligible_markets.append(m)
 
         logger.info(

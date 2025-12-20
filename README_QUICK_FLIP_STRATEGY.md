@@ -61,7 +61,7 @@ QuickFlipConfig(
 ## Integration with Trading System
 
 ### Capital Allocation
-- **20%** of total portfolio allocated to quick flip strategy
+- **30%** of total portfolio allocated to quick flip strategy (default)
 - Runs parallel with market making (30%) and directional trading (40%)
 - Independent risk management and position tracking
 

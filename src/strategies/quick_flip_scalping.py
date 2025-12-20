@@ -210,19 +210,27 @@ class QuickFlipScalpingStrategy:
         Use AI to analyze potential for quick price movement.
         """
         try:
+            # Get recent news context for the market
+            from src.clients.xai_client import XAIClient
+            news_context = ""
+            if hasattr(self.xai_client, 'search'):
+                news_context = await self.xai_client.search(f"Latest news and data for {market.title}", max_length=500)
+            
             # Create focused prompt for quick movement analysis
             prompt = f"""
 QUICK SCALP ANALYSIS for {market.title}
 
 Current {side} price: {current_price}¢
 Market closes: {datetime.fromtimestamp(market.expiration_ts).strftime('%Y-%m-%d %H:%M')}
+Current News/Data: {news_context if news_context else "No recent data found."}
 
 Analyze for IMMEDIATE (next 30 minutes) price movement potential:
 
-1. Is there likely catalysts/news that could move price UP in next 30 min?
-2. Current momentum/volatility indicators
-3. What price could {side} realistically reach in 30 min?
-4. Confidence level (0-1) for upward movement
+1. 🚨 STALE DATA CHECK: Has the event already occurred or is the outcome already certain based on the news? If so, CONFIDENCE must be 0.
+2. Is there likely catalysts/news that could move price UP in next 30 min?
+3. Current momentum/volatility indicators
+4. What price could {side} realistically reach in 30 min?
+5. Confidence level (0-1) for upward movement
 
 Respond with:
 TARGET_PRICE: [realistic price in cents]

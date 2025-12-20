@@ -85,10 +85,9 @@ async def should_exit_position(
             # For YES positions, take profit when price rises above target
             take_profit_triggered = current_price >= position.take_profit_price and pnl > 0
         else:
-            pnl = (position.entry_price - current_price) * position.quantity  
-            # For NO positions, take profit when we're in profit
-            # NO profits when yes_price drops, meaning our no_price rises
-            take_profit_triggered = current_price <= position.take_profit_price and pnl > 0
+            pnl = (current_price - position.entry_price) * position.quantity  
+            # For NO positions, take profit when NO price rises above target
+            take_profit_triggered = current_price >= position.take_profit_price and pnl > 0
             
         if take_profit_triggered:
             return True, "take_profit", current_price
@@ -172,17 +171,30 @@ async def update_trailing_stop(
 async def calculate_dynamic_exit_levels(position: Position) -> dict:
     """Calculate smart exit levels using Grok4 recommendations."""
     from src.utils.stop_loss_calculator import StopLossCalculator
+    from src.config.settings import settings
+    
+    if not settings.trading.use_dynamic_exits:
+        stop_loss_price = StopLossCalculator.calculate_simple_stop_loss(
+            entry_price=position.entry_price,
+            side=position.side,
+            stop_loss_pct=StopLossCalculator.DEFAULT_STOP_LOSS_PCT
+        )
+        take_profit_price = position.entry_price * (1 + StopLossCalculator.DEFAULT_TAKE_PROFIT_PCT)
+        return {
+            'stop_loss_price': round(stop_loss_price, 2),
+            'take_profit_price': round(min(0.99, take_profit_price), 2),
+            'max_hold_hours': settings.trading.max_hold_time_hours,
+            'target_confidence_change': settings.trading.confidence_decay_threshold
+        }
     
     # Use the centralized stop-loss calculator
-    exit_levels = StopLossCalculator.calculate_stop_loss_levels(
+    return StopLossCalculator.calculate_stop_loss_levels(
         entry_price=position.entry_price,
         side=position.side,
         confidence=position.confidence or 0.7,
         market_volatility=0.2,  # Default volatility estimate
         time_to_expiry_days=30.0  # Default time estimate
     )
-    
-    return exit_levels
 
 async def run_tracking(db_manager: Optional[DatabaseManager] = None):
     """
@@ -255,7 +267,7 @@ async def run_tracking(db_manager: Optional[DatabaseManager] = None):
                 # 🚨 SAFEGUARD: Skip markets with 0 prices - likely API issues or closed markets
                 # Only allow 0 price for market resolution (where result is known)
                 if current_yes_price == 0 and current_no_price == 0 and market_status != 'closed':
-                    logger.warning(f"⚠️ Skipping {position.market_id} - API returned 0 prices (status: {market_status})")
+                    logger.debug(f"⚠️ Skipping {position.market_id} - No Liquidity / 0 Bids (active status) - waiting for market data")
                     continue
                 
                 # If position doesn't have exit strategy set, calculate defaults
@@ -287,6 +299,23 @@ async def run_tracking(db_manager: Optional[DatabaseManager] = None):
                         f"Entry: {position.entry_price:.3f}, Exit: {exit_price:.3f}"
                     )
                     
+                    # 🚨 🚨 CRITICAL FIX: Actually execute the sell on Kalshi!
+                    # Only need to sell if market is still active (not resolution-based exit)
+                    if exit_reason != "market_resolution":
+                        from src.jobs.execute import close_position_market
+                        success, actual_exit_price = await close_position_market(
+                            position=position,
+                            db_manager=db_manager,
+                            kalshi_client=kalshi_client
+                        )
+                        if success:
+                            # Use the actual price we got from the market order
+                            exit_price = actual_exit_price
+                            logger.info(f"✅ Market sell executed successfully for {position.market_id} at ${exit_price:.2f}")
+                        else:
+                            logger.error(f"❌ Failed to execute market sell for {position.market_id}. Will retry in next cycle.")
+                            continue  # Don't mark as closed in DB if sell failed
+
                     # Calculate PnL
                     pnl = (exit_price - position.entry_price) * position.quantity
                     
@@ -300,7 +329,8 @@ async def run_tracking(db_manager: Optional[DatabaseManager] = None):
                         pnl=pnl,
                         entry_timestamp=position.timestamp,
                         exit_timestamp=datetime.now(),
-                        rationale=f"{position.rationale} | EXIT: {exit_reason}"
+                        rationale=f"{position.rationale} | EXIT: {exit_reason}",
+                        strategy=position.strategy
                     )
 
                     # Record the exit

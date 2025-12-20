@@ -1,197 +1,120 @@
 #!/usr/bin/env python3
 """
-Analytics Processor for Kalshi Trading Bot
-Processes and analyzes trading data for insights and optimization
+Background Analytics Processor 📊
+
+Periodically computes and caches complex analytics for the trading dashboard to
+ensure fast load times even with large trade histories.
 """
 
 import asyncio
+import json
 import logging
-import os
+from datetime import datetime
 import sys
-import time
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+import os
 
-# Add app root to path for imports
-sys.path.append('/app')
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add project root to path for imports
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(project_root)
 
-try:
-    from src.database.db_manager import DatabaseManager
-except ImportError:
-    # Fallback for different path structures
-    from database.db_manager import DatabaseManager
+from src.utils.database import DatabaseManager
+from src.utils.logging_setup import setup_logging
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-logger = logging.getLogger(__name__)
-
+logger = logging.getLogger("analytics_processor")
 
 class AnalyticsProcessor:
-    """Processes trading analytics and generates insights"""
-
-    def __init__(self):
-        self.db_manager = None
-        self.running = False
-        self.processing_interval = 300  # 5 minutes
-
-    async def initialize(self):
-        """Initialize the analytics processor"""
+    """Computes and caches analytics data for the system."""
+    
+    def __init__(self, db_path: str = 'trading_system.db'):
+        self.db_manager = DatabaseManager(db_path)
+        self.interval = 300  # 5 minutes
+        
+    async def run_once(self):
+        """Run a single analytics computation cycle."""
+        logger.info("📊 Starting analytics computation cycle...")
+        start_time = datetime.now()
+        
         try:
-            self.db_manager = DatabaseManager()
             await self.db_manager.initialize()
-            logger.info("Analytics processor initialized successfully")
+            
+            # 1. P&L by Period
+            logger.info("Computing P&L by period...")
+            periods = ['today', 'week', 'month', 'all']
+            pnl_data = {}
+            for period in periods:
+                pnl_data[period] = await self.db_manager.get_pnl_by_period(period)
+            await self._cache_result("period_pnl", pnl_data)
+            
+            # 2. Category Performance
+            logger.info("Computing category performance...")
+            cat_perf = await self.db_manager.get_category_performance()
+            await self._cache_result("category_performance", cat_perf)
+            
+            # 3. Time-of-Day Performance
+            logger.info("Computing hourly performance...")
+            hourly_perf = await self.db_manager.get_hourly_performance()
+            await self._cache_result("hourly_performance", hourly_perf)
+            
+            # 4. Expiry Performance
+            logger.info("Computing expiry performance...")
+            expiry_perf = await self.db_manager.get_expiry_performance()
+            await self._cache_result("expiry_performance", expiry_perf)
+            
+            # 5. Confidence Calibration
+            logger.info("Computing confidence calibration...")
+            calibration = await self.db_manager.get_confidence_calibration()
+            await self._cache_result("confidence_calibration", calibration)
+            
+            # 6. Trading Streaks
+            logger.info("Computing trading streaks...")
+            streaks = await self.db_manager.get_trading_streaks()
+            await self._cache_result("trading_streaks", streaks)
+            
+            # 7. AI Cost History
+            logger.info("Computing AI cost history...")
+            cost_hist = await self.db_manager.get_ai_cost_history(days=30)
+            await self._cache_result("ai_cost_history", cost_hist)
+            
+            end_time = datetime.now()
+            duration = (end_time - start_time).total_seconds()
+            logger.info(f"✅ Analytics computation complete in {duration:.2f}s")
+            
         except Exception as e:
-            logger.error(f"Failed to initialize analytics processor: {e}")
-            raise
-
-    async def process_trading_analytics(self):
-        """Process recent trading data and generate analytics"""
-        try:
-            logger.info("Processing trading analytics...")
-
-            # Get recent performance metrics
-            performance_data = await self.get_performance_metrics()
-
-            # Analyze trading patterns
-            patterns = await self.analyze_trading_patterns()
-
-            # Calculate risk metrics
-            risk_metrics = await self.calculate_risk_metrics()
-
-            # Store analytics results
-            await self.store_analytics_results(
-                performance_data, patterns, risk_metrics
-            )
-
-            logger.info("Analytics processing completed")
-
-        except Exception as e:
-            logger.error(f"Error processing analytics: {e}")
-
-    async def get_performance_metrics(self) -> Dict:
-        """Get recent performance metrics"""
-        try:
-            # Get trades from last 24 hours
-            cutoff_time = datetime.now() - timedelta(hours=24)
-
-            # This would normally query the database for recent trades
-            # For now, return placeholder data
-            return {
-                "total_trades": 0,
-                "winning_trades": 0,
-                "losing_trades": 0,
-                "total_pnl": 0.0,
-                "win_rate": 0.0,
-                "average_trade_size": 0.0,
-                "max_drawdown": 0.0,
-                "sharpe_ratio": 0.0
-            }
-        except Exception as e:
-            logger.error(f"Error getting performance metrics: {e}")
-            return {}
-
-    async def analyze_trading_patterns(self) -> Dict:
-        """Analyze trading patterns and trends"""
-        try:
-            # Analyze market conditions, trade timing, etc.
-            return {
-                "optimal_trading_hours": [],
-                "market_condition_performance": {},
-                "position_size_trends": {},
-                "trade_duration_patterns": {}
-            }
-        except Exception as e:
-            logger.error(f"Error analyzing trading patterns: {e}")
-            return {}
-
-    async def calculate_risk_metrics(self) -> Dict:
-        """Calculate risk-related metrics"""
-        try:
-            return {
-                "portfolio_beta": 0.0,
-                "value_at_risk": 0.0,
-                "expected_shortfall": 0.0,
-                "max_position_size": 0.0,
-                "leverage_ratio": 0.0,
-                "correlation_matrix": {}
-            }
-        except Exception as e:
-            logger.error(f"Error calculating risk metrics: {e}")
-            return {}
-
-    async def store_analytics_results(self, performance: Dict, patterns: Dict, risk: Dict):
-        """Store analytics results in database"""
-        try:
-            # This would normally store the analytics in the database
-            # For now, just log the results
-            logger.info(f"Performance metrics: {performance}")
-            logger.info(f"Trading patterns: {patterns}")
-            logger.info(f"Risk metrics: {risk}")
-        except Exception as e:
-            logger.error(f"Error storing analytics results: {e}")
-
-    async def run(self):
-        """Main analytics processing loop"""
-        await self.initialize()
-
-        self.running = True
-        logger.info(f"Analytics processor started (interval: {self.processing_interval}s)")
-
-        try:
-            while self.running:
-                start_time = time.time()
-
-                await self.process_trading_analytics()
-
-                # Calculate sleep time (interval minus processing time)
-                processing_time = time.time() - start_time
-                sleep_time = max(0, self.processing_interval - processing_time)
-
-                if sleep_time > 0:
-                    await asyncio.sleep(sleep_time)
-                else:
-                    logger.warning(f"Analytics processing took {processing_time:.2f}s, longer than interval {self.processing_interval}s")
-
-        except asyncio.CancelledError:
-            logger.info("Analytics processor cancelled")
-        except Exception as e:
-            logger.error(f"Analytics processor error: {e}")
+            logger.error(f"❌ Error in analytics cycle: {e}")
         finally:
-            await self.cleanup()
+            await self.db_manager.close()
 
-    async def stop(self):
-        """Stop the analytics processor"""
-        logger.info("Stopping analytics processor...")
-        self.running = False
-
-    async def cleanup(self):
-        """Clean up resources"""
+    async def _cache_result(self, key: str, data: any):
+        """Store computed data in the database cache."""
         try:
-            if self.db_manager:
-                await self.db_manager.close()
-            logger.info("Analytics processor cleaned up successfully")
+            import aiosqlite
+            async with aiosqlite.connect(self.db_manager.db_path) as db:
+                await db.execute("""
+                    INSERT OR REPLACE INTO analytics_cache (key, value, computed_at)
+                    VALUES (?, ?, ?)
+                """, (key, json.dumps(data), datetime.now().isoformat()))
+                await db.commit()
         except Exception as e:
-            logger.error(f"Error during cleanup: {e}")
+            logger.error(f"Error caching {key}: {e}")
 
+    async def run_forever(self):
+        """Run the processor in a loop."""
+        logger.info(f"🚀 Analytics Processor started (Interval: {self.interval}s)")
+        while True:
+            await self.run_once()
+            await asyncio.sleep(self.interval)
 
 async def main():
-    """Main entry point for analytics processor"""
+    setup_logging(log_level="INFO")
     processor = AnalyticsProcessor()
-
-    try:
-        await processor.run()
-    except KeyboardInterrupt:
-        logger.info("Received keyboard interrupt")
-        await processor.stop()
-    except Exception as e:
-        logger.error(f"Analytics processor failed: {e}")
-        await processor.stop()
-
+    await processor.run_forever()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("👋 Analytics Processor stopped by user")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        sys.exit(1)
+

@@ -32,6 +32,7 @@ COPY beast_mode_bot.py .
 COPY trading_dashboard.py .
 COPY main.py .
 COPY init_database.py .
+COPY sync_kalshi.py .
 COPY sync_positions.py .
 COPY start_railway.sh .
 

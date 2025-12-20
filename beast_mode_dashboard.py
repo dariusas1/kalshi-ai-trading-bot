@@ -36,6 +36,7 @@ from src.strategies.unified_trading_system import (
     TradingSystemConfig,
     TradingSystemResults
 )
+from src.jobs.performance_dashboard_integration import dashboard_get_summary
 
 
 class BeastModeDashboard:
@@ -112,8 +113,34 @@ class BeastModeDashboard:
             except Exception:
                 available_cash = 0
             
-            # Get current positions
-            positions = await self.db_manager.get_open_positions()
+            # Get current positions (use Kalshi as source of truth for dashboard)
+            try:
+                positions_response = await self.kalshi_client.get_positions()
+                if isinstance(positions_response, dict) and 'positions' in positions_response:
+                    # Convert API response to list of objects compatible with display logic
+                    raw_positions = positions_response['positions']
+                    positions = []
+                    for p in raw_positions:
+                        # Wrap in simple object or dict for display compatibility
+                        # Dashboard expects object with attributes
+                        class PositionView:
+                            def __init__(self, data):
+                                self.market_id = data.get('ticker', 'Unknown')
+                                self.side = data.get('side', 'Unknown').upper()
+                                self.entry_price = data.get('avg_price', 0) / 100 # API returns cents
+                                self.quantity = abs(data.get('position', 0) or data.get('quantity', 0))
+                                self.rationale = "Live Position"
+                                self.stop_loss_price = None
+                                self.take_profit_price = None
+                        
+                        if p.get('position', 0) != 0 or p.get('quantity', 0) != 0:
+                            positions.append(PositionView(p))
+                else:
+                    # Fallback to DB if API fails or empty
+                    positions = await self.db_manager.get_open_positions()
+            except Exception as e:
+                print(f"Error fetching live positions from API: {e}. Using DB fallback.")
+                positions = await self.db_manager.get_open_positions()
             
             # Calculate total position value
             total_position_value = 0
@@ -137,7 +164,7 @@ class BeastModeDashboard:
             # Get recent trades
             recent_trades = await self._get_recent_trade_performance()
             
-            # Get cost analysis
+            # Get cost analysis (REAL DATA)
             cost_analysis = await self._get_cost_analysis()
             
             # Get market opportunities
@@ -148,6 +175,13 @@ class BeastModeDashboard:
             
             # Get AI spending
             daily_ai_cost = await self.db_manager.get_daily_ai_cost()
+
+            performance_summary = None
+            if settings.trading.performance_monitoring:
+                try:
+                    performance_summary = await dashboard_get_summary()
+                except Exception as e:
+                    print(f"Error fetching performance summary: {e}")
             
             return {
                 'system_performance': system_performance,
@@ -158,6 +192,7 @@ class BeastModeDashboard:
                 'daily_ai_cost': daily_ai_cost,
                 'available_cash': available_cash,
                 'total_position_value': total_position_value,
+                'performance_summary': performance_summary,
                 'timestamp': datetime.now().isoformat()
             }
             
@@ -377,6 +412,13 @@ class BeastModeDashboard:
             print(f"   Market Making: {settings.trading.market_making_allocation:.0%}")
             print(f"   Directional: {settings.trading.directional_allocation:.0%}")
             print(f"   Quick Flip: {settings.trading.quick_flip_allocation:.0%}")
+
+            perf_summary = performance.get('performance_summary')
+            if perf_summary:
+                metrics = perf_summary.get('metrics', {})
+                print(f"\n🧭 Performance Health: {metrics.get('health_score', 0):.1f}/100")
+                print(f"   Critical Issues: {metrics.get('critical_issues', 0)}")
+                print(f"   Warnings: {metrics.get('warnings', 0)}")
             
         except Exception as e:
             print(f"Error displaying system health: {e}")
@@ -413,16 +455,22 @@ class BeastModeDashboard:
             }
 
     async def _get_cost_analysis(self) -> Dict:
-        """Get AI cost analysis."""
+        """Get AI cost analysis from database."""
         try:
-            # This would analyze AI spending patterns
+            # Fetch daily stats from DB manager
+            daily_stats = await self.db_manager.get_daily_ai_cost_breakdown()
+            
+            return {
+                'analyses_today': daily_stats.get('request_count', 0),
+                'avg_cost_per_analysis': daily_stats.get('avg_cost', 0.0),
+                'total_daily_cost': daily_stats.get('total_cost', 0.0)
+            }
+        except Exception as e:
             return {
                 'analyses_today': 0,
                 'avg_cost_per_analysis': 0.0,
-                'total_weekly_cost': 0.0
+                'total_daily_cost': 0.0
             }
-        except Exception as e:
-            return {}
 
     def _calculate_avg_time_to_expiry(self, positions) -> float:
         """Calculate average time to expiry for positions."""

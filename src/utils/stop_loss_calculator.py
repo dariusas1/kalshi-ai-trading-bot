@@ -73,10 +73,19 @@ class StopLossCalculator:
         else:
             stop_loss_pct = cls.MAX_STOP_LOSS_PCT  # 10% for low confidence
             
-        # Adjust for market volatility
-        # Higher volatility = wider stops to avoid getting stopped out by noise
-        volatility_adjustment = min(1.5, 1.0 + (market_volatility - 0.2))
-        adjusted_stop_loss_pct = stop_loss_pct * volatility_adjustment
+        # Adjust for market volatility (if enabled)
+        try:
+            from src.config.settings import settings
+            volatility_enabled = settings.trading.volatility_adjustment
+        except Exception:
+            volatility_enabled = True
+
+        if volatility_enabled:
+            # Higher volatility = wider stops to avoid getting stopped out by noise
+            volatility_adjustment = min(1.5, 1.0 + (market_volatility - 0.2))
+            adjusted_stop_loss_pct = stop_loss_pct * volatility_adjustment
+        else:
+            adjusted_stop_loss_pct = stop_loss_pct
         
         # Calculate take-profit percentage (inverse of stop-loss logic)
         # Higher confidence = wider take-profit targets
@@ -93,9 +102,10 @@ class StopLossCalculator:
             stop_loss_price = entry_price * (1 - adjusted_stop_loss_pct)
             take_profit_price = entry_price * (1 + take_profit_pct)
         else:
-            # For NO positions, stop-loss is above entry, take-profit is below  
-            stop_loss_price = entry_price * (1 + adjusted_stop_loss_pct)
-            take_profit_price = entry_price * (1 - take_profit_pct)
+            # For NO positions, stop-loss is ALSO below entry, take-profit is ALSO above
+            # (assuming entry_price and current_price refer to the NO price)
+            stop_loss_price = entry_price * (1 - adjusted_stop_loss_pct)
+            take_profit_price = entry_price * (1 + take_profit_pct)
             
         # Ensure prices are within valid bounds (1¢ to 99¢)
         stop_loss_price = max(0.01, min(0.99, stop_loss_price))
@@ -105,14 +115,25 @@ class StopLossCalculator:
         # Hold for maximum 50% of time to expiry, or 72 hours, whichever is less
         max_hold_hours = min(72, time_to_expiry_days * 24 * 0.5)
         max_hold_hours = max(6, max_hold_hours)  # Minimum 6 hours
+        try:
+            from src.config.settings import settings
+            max_hold_hours = min(max_hold_hours, settings.trading.max_hold_time_hours)
+        except Exception:
+            pass
         
+        try:
+            from src.config.settings import settings
+            target_confidence_change = settings.trading.confidence_decay_threshold
+        except Exception:
+            target_confidence_change = 0.15
+
         return {
             'stop_loss_price': round(stop_loss_price, 2),
             'take_profit_price': round(take_profit_price, 2),
             'max_hold_hours': int(max_hold_hours),
             'stop_loss_pct': round(adjusted_stop_loss_pct * 100, 1),
             'take_profit_pct': round(take_profit_pct * 100, 1),
-            'target_confidence_change': 0.15  # Exit if confidence drops 15%
+            'target_confidence_change': target_confidence_change
         }
     
     @classmethod
@@ -133,11 +154,8 @@ class StopLossCalculator:
         Returns:
             Stop-loss price
         """
-        if side.upper() == "YES":
-            stop_loss_price = entry_price * (1 - stop_loss_pct)
-        else:
-            stop_loss_price = entry_price * (1 + stop_loss_pct)
-            
+        # For both YES and NO, stop-loss is below entry
+        stop_loss_price = entry_price * (1 - stop_loss_pct)
         return max(0.01, min(0.99, round(stop_loss_price, 2)))
     
     @classmethod
@@ -160,12 +178,8 @@ class StopLossCalculator:
         Returns:
             True if stop-loss should be triggered
         """
-        if position_side.upper() == "YES":
-            # For YES positions, trigger if price drops below stop-loss
-            return current_price <= stop_loss_price
-        else:
-            # For NO positions, trigger if price rises above stop-loss
-            return current_price >= stop_loss_price
+        # For both YES and NO shares, trigger if price drops below stop-loss
+        return current_price <= stop_loss_price
     
     @classmethod
     def calculate_pnl_at_stop_loss(
@@ -181,11 +195,8 @@ class StopLossCalculator:
         Returns:
             Expected P&L (negative for loss)
         """
-        if side.upper() == "YES":
-            pnl_per_share = stop_loss_price - entry_price
-        else:
-            pnl_per_share = entry_price - stop_loss_price
-            
+        # For both YES and NO, P&L is (exit - entry) * quantity
+        pnl_per_share = stop_loss_price - entry_price
         return pnl_per_share * quantity
 
 

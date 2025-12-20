@@ -1,69 +1,47 @@
 #!/bin/bash
+set -e
 
-# Railway startup script for Kalshi AI Trading Bot
+echo "🚀 Starting Kalshi AI Trading Bot Platform..."
+export PYTHONPATH=$PYTHONPATH:.
 
-echo "🚀 Starting Kalshi AI Trading Bot on Railway..."
-
-# Set Railway's PORT for Streamlit if not already set
-export PORT=${PORT:-8501}
-echo "📡 Streamlit will run on port: $PORT"
-
-# Check if required environment variables are set
-if [ -z "$KALSHI_API_KEY" ]; then
-    echo "⚠️  Warning: KALSHI_API_KEY not set"
-    echo "   The dashboard will start in demo mode without trading functionality"
-    export DEMO_MODE=true
-else
-    echo "✅ KALSHI_API_KEY found - full functionality enabled"
-    export DEMO_MODE=false
+# Load environment variables from .env if it exists
+if [ -f .env ]; then
+    echo "📜 Loading environment variables from .env..."
+    # Specifically extract live trading setting and export it
+    export LIVE_TRADING_ENABLED=$(grep "^LIVE_TRADING_ENABLED=" .env | cut -d '=' -f2 | tr -d '"' | tr -d "'" || true)
+    export ENABLE_PERFORMANCE_SYSTEM_MANAGER=$(grep "^ENABLE_PERFORMANCE_SYSTEM_MANAGER=" .env | cut -d '=' -f2 | tr -d '"' | tr -d "'" || true)
+    if [ -z "$LIVE_TRADING_ENABLED" ]; then
+        LIVE_TRADING_ENABLED="false"
+    fi
 fi
 
-# Initialize database (this should work without API keys)
-echo "🗄️ Initializing database..."
+# 1. Initialize Database
+echo "🗄️  Initializing database..."
 python init_database.py
 
-# Only start background processes if we have API keys
-if [ "$DEMO_MODE" = false ]; then
-    echo "🤖 Starting trading bot in background..."
+# 2. Start Analytics Processor in background
+echo "📊 Starting Analytics Processor..."
+python src/analytics/analytics_processor.py &
 
-    # Check if trading bot can start (has all dependencies)
-    if python -c "import sys; sys.path.append('/app'); from beast_mode_dashboard import BeastModeDashboard; print('Dependencies OK')" 2>/dev/null; then
-        python beast_mode_bot.py &
-        BOT_PID=$!
-        echo "✅ Trading bot started (PID: $BOT_PID)"
-    else
-        echo "⚠️  Trading bot has missing dependencies - skipping for now"
-        echo "    Dashboard will still work with live API access"
-        BOT_PID=""
-    fi
-
-    echo "📊 Starting analytics processor in background..."
-    if [ -f "src/analytics/analytics_processor.py" ]; then
-        python src/analytics/analytics_processor.py &
-        ANALYTICS_PID=$!
-        echo "✅ Analytics processor started (PID: $ANALYTICS_PID)"
-
-        # Give analytics a moment to start and check if it's running
-        sleep 2
-        if ! kill -0 $ANALYTICS_PID 2>/dev/null; then
-            echo "⚠️  Analytics processor failed to start - continuing without it"
-            ANALYTICS_PID=""
-        fi
-    else
-        echo "⚠️  Analytics processor not found - skipping"
-        ANALYTICS_PID=""
-    fi
-
-    # Summary of started processes
-    echo ""
-    echo "📋 Background Processes Status:"
-    echo "   Trading Bot: ${BOT_PID:+Running (PID: $BOT_PID)}"
-    echo "   Analytics: ${ANALYTICS_PID:+Running (PID: $ANALYTICS_PID)}"
-    echo ""
+# 3. Start Beast Mode Bot in background
+echo "🤖 Starting Beast Mode Bot..."
+# Note: We use --live if the ENVIRONMENT variable LIVE_TRADING_ENABLED is 'true'
+if [ "$LIVE_TRADING_ENABLED" = "true" ]; then
+    echo "⚠️  LIVE TRADING ENABLED"
+    python beast_mode_bot.py --live &
 else
-    echo "🎭 Demo mode: Skipping background processes"
+    echo "🧪 PAPER TRADING MODE"
+    python beast_mode_bot.py &
 fi
 
-# Start Streamlit dashboard as main process
-echo "🎛️ Starting Streamlit dashboard..."
-exec streamlit run trading_dashboard.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true
+# 3b. Start Performance System Manager (optional)
+if [ "$ENABLE_PERFORMANCE_SYSTEM_MANAGER" = "true" ]; then
+    echo "📈 Starting Performance System Manager..."
+    python performance_system_manager.py --start &
+fi
+
+# 4. Start Streamlit Dashboard in foreground
+# Railway provides the PORT environment variable, default to 8501 for local
+APP_PORT=${PORT:-8501}
+echo "📈 Starting Dashboard on port $APP_PORT..."
+streamlit run trading_dashboard.py --server.port $APP_PORT --server.address 0.0.0.0

@@ -35,6 +35,7 @@ class LimitOrder:
     side: str  # "YES" or "NO"
     price: float  # Price in cents (0-100)
     quantity: int
+    action: str = "buy"
     order_type: str = "limit"
     status: str = "pending"  # pending, placed, filled, cancelled
     order_id: Optional[str] = None
@@ -114,11 +115,21 @@ class AdvancedMarketMaker:
         # Inventory tracking
         self.net_yes_inventory = 0
         self.net_no_inventory = 0
-        self.max_inventory_skew = getattr(settings.trading, 'max_inventory_risk', 500) # $500 max skew
+        self.max_inventory_skew = getattr(settings.trading, 'max_inventory_skew', 500) # $500 max skew
+
+    async def _get_available_capital(self) -> float:
+        """Fetch available cash balance for sizing."""
+        try:
+            balance_response = await self.kalshi_client.get_balance()
+            return balance_response.get('balance', 0) / 100
+        except Exception as e:
+            self.logger.warning(f"Could not fetch balance, using min_balance: {e}")
+            return getattr(settings.trading, 'min_balance', 1000.0)
 
     async def analyze_market_making_opportunities(
         self, 
-        markets: List[Market]
+        markets: List[Market],
+        available_capital: Optional[float] = None
     ) -> List[MarketMakingOpportunity]:
         """
         Analyze markets for market making opportunities.
@@ -126,6 +137,7 @@ class AdvancedMarketMaker:
         Returns list of opportunities ranked by expected profitability.
         """
         opportunities = []
+        sizing_capital = available_capital or await self._get_available_capital()
         
         for market in markets:
             try:
@@ -134,11 +146,12 @@ class AdvancedMarketMaker:
                 if not market_data:
                     continue
                     
-                current_yes_price = market_data.get('yes_price', 0) / 100
-                current_no_price = market_data.get('no_price', 0) / 100
+                market_info = market_data.get('market', {})
+                current_yes_price = market_info.get('yes_price', 0) / 100
+                current_no_price = market_info.get('no_price', 0) / 100
                 
-                # Skip if prices are extreme (hard to make markets) - relaxed thresholds
-                if current_yes_price < 0.02 or current_yes_price > 0.98:
+                # Skip if prices are extreme (hard to make markets) - STRICTER thresholds to avoid 99% bets
+                if current_yes_price < 0.05 or current_yes_price > 0.95:
                     continue
                 
                 # Get AI prediction for edge calculation
@@ -160,7 +173,7 @@ class AdvancedMarketMaker:
                 if yes_edge_result.passes_filter or no_edge_result.passes_filter:
                     # Calculate market making opportunity
                     opportunity = await self._calculate_market_making_opportunity(
-                        market, current_yes_price, current_no_price, ai_prob, ai_confidence
+                        market, current_yes_price, current_no_price, ai_prob, ai_confidence, sizing_capital
                     )
                     
                     if opportunity and opportunity.total_expected_profit > 0:
@@ -183,7 +196,8 @@ class AdvancedMarketMaker:
         yes_price: float,
         no_price: float, 
         ai_prob: float,
-        ai_confidence: float
+        ai_confidence: float,
+        available_capital: float
     ) -> Optional[MarketMakingOpportunity]:
         """
         Calculate optimal market making prices and expected profits.
@@ -228,7 +242,7 @@ class AdvancedMarketMaker:
             
             # Calculate optimal position sizes using Kelly Criterion
             yes_size, no_size = await self._calculate_optimal_sizes(
-                yes_edge, no_edge, volatility, ai_confidence
+                yes_edge, no_edge, volatility, ai_confidence, available_capital, yes_price, no_price
             )
             
             return MarketMakingOpportunity(
@@ -286,14 +300,18 @@ class AdvancedMarketMaker:
         yes_edge: float, 
         no_edge: float, 
         volatility: float,
-        confidence: float
+        confidence: float,
+        available_capital: float,
+        yes_price: float,
+        no_price: float
     ) -> Tuple[int, int]:
         """
         Calculate optimal position sizes using Kelly Criterion principles.
         """
         try:
             # Available capital for market making
-            available_capital = getattr(settings.trading, 'max_position_size', 1000)
+            max_position_pct = getattr(settings.trading, 'max_position_size_pct', 3.0) / 100
+            available_capital = max(0.0, available_capital) * max_position_pct
             
             # Kelly fraction calculation
             # f* = (bp - q) / b where b=odds, p=win_prob, q=lose_prob
@@ -302,17 +320,22 @@ class AdvancedMarketMaker:
             if yes_edge > 0:
                 win_prob = 0.5 + (yes_edge * confidence)
                 kelly_yes = max(0, min(0.25, (win_prob - 0.5) / 0.5))  # Cap at 25%
-                yes_size = int(available_capital * kelly_yes)
+                yes_budget = available_capital * kelly_yes
             else:
-                yes_size = int(available_capital * 0.05)  # Small size for unfavorable
+                yes_budget = available_capital * 0.05  # Small size for unfavorable
             
             # For NO side  
             if no_edge > 0:
                 win_prob = 0.5 + (no_edge * confidence)
                 kelly_no = max(0, min(0.25, (win_prob - 0.5) / 0.5))
-                no_size = int(available_capital * kelly_no)
+                no_budget = available_capital * kelly_no
             else:
-                no_size = int(available_capital * 0.05)
+                no_budget = available_capital * 0.05
+
+            yes_price = max(0.01, yes_price)
+            no_price = max(0.01, no_price)
+            yes_size = int(yes_budget / yes_price)
+            no_size = int(no_budget / no_price)
             
             # Ensure minimum sizes
             yes_size = max(10, yes_size)  # Minimum $10
@@ -393,9 +416,9 @@ class AdvancedMarketMaker:
         
         for opportunity in top_opportunities:
             try:
-                await self._place_market_making_orders(opportunity)
+                orders = await self._place_market_making_orders(opportunity)
                 
-                results['orders_placed'] += 2  # YES and NO orders
+                results['orders_placed'] += len(orders)
                 results['total_exposure'] += opportunity.optimal_yes_size + opportunity.optimal_no_size
                 results['expected_profit'] += opportunity.total_expected_profit
                 results['markets_count'] += 1
@@ -411,7 +434,7 @@ class AdvancedMarketMaker:
         
         return results
 
-    async def _place_market_making_orders(self, opportunity: MarketMakingOpportunity):
+    async def _place_market_making_orders(self, opportunity: MarketMakingOpportunity) -> List[LimitOrder]:
         """
         Place the actual limit orders for market making.
         """
@@ -423,6 +446,7 @@ class AdvancedMarketMaker:
             side="YES",
             price=opportunity.optimal_yes_bid * 100,  # Convert to cents
             quantity=opportunity.optimal_yes_size,
+            action="buy",
             expected_profit=opportunity.yes_spread_profit
         )
         
@@ -432,10 +456,35 @@ class AdvancedMarketMaker:
             side="NO", 
             price=opportunity.optimal_no_bid * 100,
             quantity=opportunity.optimal_no_size,
+            action="buy",
             expected_profit=opportunity.no_spread_profit
         )
         
-        orders.extend([yes_bid_order, no_bid_order])
+        # Create YES ask order (sell YES higher)
+        yes_ask_order = LimitOrder(
+            market_id=opportunity.market_id,
+            side="YES",
+            price=opportunity.optimal_yes_ask * 100,
+            quantity=opportunity.optimal_yes_size,
+            action="sell",
+            expected_profit=opportunity.yes_spread_profit
+        )
+
+        # Create NO ask order (sell NO higher)
+        no_ask_order = LimitOrder(
+            market_id=opportunity.market_id,
+            side="NO",
+            price=opportunity.optimal_no_ask * 100,
+            quantity=opportunity.optimal_no_size,
+            action="sell",
+            expected_profit=opportunity.no_spread_profit
+        )
+        
+        orders.extend([yes_bid_order, no_bid_order, yes_ask_order, no_ask_order])
+        
+        max_orders = getattr(settings.trading, 'max_orders_per_market', len(orders))
+        if max_orders and len(orders) > max_orders:
+            orders = orders[:max_orders]
         
         # Place orders with Kalshi (simulated for now)
         for order in orders:
@@ -445,6 +494,7 @@ class AdvancedMarketMaker:
         if opportunity.market_id not in self.active_orders:
             self.active_orders[opportunity.market_id] = []
         self.active_orders[opportunity.market_id].extend(orders)
+        return orders
 
     async def _place_limit_order(self, order: LimitOrder):
         """
@@ -467,9 +517,9 @@ class AdvancedMarketMaker:
                     "ticker": order.market_id,
                     "client_order_id": client_order_id,
                     "side": side,
-                    "action": "buy",  # Market making involves buying at our bid prices
+                    "action": order.action,
                     "count": order.quantity,
-                    "type_": "limit"  # FIXED: use type_ not type
+                    "type_": "limit"
                 }
                 
                 # Add the appropriate price parameter (required for limit orders)
@@ -612,12 +662,19 @@ class AdvancedMarketMaker:
         Determine if an order should be updated based on market conditions.
         """
         try:
+            if order.placed_at:
+                refresh_minutes = getattr(settings.trading, 'order_refresh_minutes', 15)
+                age_minutes = (datetime.now() - order.placed_at).total_seconds() / 60
+                if age_minutes >= refresh_minutes:
+                    return True
+
             # Get current market data
             market_data = await self.kalshi_client.get_market(order.market_id)
             if not market_data:
                 return False
             
-            current_yes_price = market_data.get('yes_price', 0) / 100
+            market_info = market_data.get('market', market_data)
+            current_yes_price = market_info.get('yes_price', 0) / 100
             order_price = order.price / 100
             
             # Update if market has moved significantly

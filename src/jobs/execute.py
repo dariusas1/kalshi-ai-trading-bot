@@ -6,7 +6,7 @@ This job takes a position and executes it as a trade.
 import asyncio
 import uuid
 from datetime import datetime
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 
 from src.utils.database import DatabaseManager, Position
 from src.config.settings import settings
@@ -41,7 +41,15 @@ async def execute_position(
     logger = get_trading_logger("trade_execution")
     logger.info(f"Executing position for market: {position.market_id}")
 
-    # Validate ticker (KXMV is now standard for all sports markets)
+    if settings.trading.paper_trading_mode and live_mode:
+        logger.info("Paper trading mode enabled; forcing simulated execution")
+        live_mode = False
+
+    # 🚨 CRITICAL: Validate ticker before execution
+    if position.market_id.startswith("KXMV"):
+        logger.error(f"❌ BLOCKED: Cannot execute on KXMV combo market: {position.market_id}")
+        return False
+    
     if not position.market_id or len(position.market_id) < 5:
         logger.error(f"❌ BLOCKED: Invalid market_id: {position.market_id}")
         return False
@@ -53,7 +61,7 @@ async def execute_position(
             # 🎯 SMART ORDER TYPE SELECTION
             # IOC for high edge (>10%) - urgent entry needed
             # Market orders for standard entries
-            use_ioc = edge > 0.10
+            use_ioc = edge > 0.10 and settings.trading.algorithmic_execution
             time_in_force = "immediate_or_cancel" if use_ioc else None  # API requires full name, not 'ioc'
             order_type = "market"
             
@@ -72,11 +80,16 @@ async def execute_position(
             }
             
             # 🚨 FIX: Kalshi API requires exactly ONE price field, even for market orders
-            # For market orders, use 99 cents (max willing to pay) for the side we're buying
+            # Use current ask + buffer as price cap when available.
+            buffer_cents = getattr(settings.trading, "market_order_price_buffer_cents", 2)
+            market_data = await kalshi_client.get_market(position.market_id)
+            market_info = market_data.get("market", {}) if market_data else {}
             if position.side.lower() == "yes":
-                order_args["yes_price"] = 99  # Max: 99 cents
+                ask = market_info.get("yes_ask", 0) or market_info.get("yes_price", 99)
+                order_args["yes_price"] = min(99, int(ask + buffer_cents))
             else:
-                order_args["no_price"] = 99   # Max: 99 cents
+                ask = market_info.get("no_ask", 0) or market_info.get("no_price", 99)
+                order_args["no_price"] = min(99, int(ask + buffer_cents))
             
             if time_in_force:
                 order_args["time_in_force"] = time_in_force
@@ -111,9 +124,9 @@ async def execute_position(
                     }
                     # Add required price for market order
                     if position.side.lower() == "yes":
-                        retry_args["yes_price"] = 99
+                        retry_args["yes_price"] = order_args.get("yes_price", 99)
                     else:
-                        retry_args["no_price"] = 99
+                        retry_args["no_price"] = order_args.get("no_price", 99)
                     retry_response = await kalshi_client.place_order(**retry_args)
                     retry_info = retry_response.get('order', {})
                     if retry_info.get('status') == 'filled':
@@ -147,6 +160,13 @@ async def execute_position(
                 try:
                     await kalshi_client.cancel_order(order_id)
                     logger.info(f"Cancelled unfilled order {order_id}")
+                except KalshiAPIError as e:
+                    # Check if error is 404 (Not Found) - order might be already gone/filled
+                    error_str = str(e)
+                    if "404" in error_str or "not_found" in error_str.lower():
+                        logger.info(f"Order {order_id} not found during cancel (likely already filled/expired). Proceeding.")
+                    else:
+                        logger.warning(f"Could not cancel order: {e}")
                 except Exception as cancel_err:
                     logger.warning(f"Could not cancel order: {cancel_err}")
                 
@@ -162,9 +182,9 @@ async def execute_position(
                 }
                 # Add required price for market order
                 if position.side.lower() == "yes":
-                    fallback_args["yes_price"] = 99
+                    fallback_args["yes_price"] = order_args.get("yes_price", 99)
                 else:
-                    fallback_args["no_price"] = 99
+                    fallback_args["no_price"] = order_args.get("no_price", 99)
                 fallback_response = await kalshi_client.place_order(**fallback_args)
                 fallback_info = fallback_response.get('order', {})
                 if fallback_info.get('status') == 'filled':
@@ -177,9 +197,8 @@ async def execute_position(
                     return False
             else:
                 # Unexpected status - treat as potentially filled
-                logger.warning(f"Unexpected order status: {order_status}, treating as success")
-                await db_manager.update_position_to_live(position.id, position.entry_price)
-                return True
+                logger.warning(f"Unexpected order status: {order_status}, treating as not filled")
+                return False
 
         except KalshiAPIError as e:
             logger.error(f"Failed to place LIVE order for {position.market_id}: {e}")
@@ -229,7 +248,7 @@ async def place_sell_limit_order(
             "side": side,
             "action": "sell",  # We're selling our existing position
             "count": position.quantity,
-            "type": "limit"
+            "type_": "limit"
         }
         
         # Add the appropriate price parameter based on what we're selling
@@ -313,13 +332,19 @@ async def place_profit_taking_orders(
                 
                 # Calculate current profit
                 if current_price > 0:
+                    # 🎯 Use position-specific threshold if available, otherwise use default
+                    current_threshold = profit_threshold
+                    if position.take_profit_price:
+                        # Target profit is entry + threshold, so threshold is (target - entry) / entry
+                        current_threshold = (position.take_profit_price - position.entry_price) / position.entry_price
+                    
                     profit_pct = (current_price - position.entry_price) / position.entry_price
                     unrealized_pnl = (current_price - position.entry_price) * position.quantity
                     
-                    logger.debug(f"Position {position.market_id}: Entry=${position.entry_price:.3f}, Current=${current_price:.3f}, Profit={profit_pct:.1%}, PnL=${unrealized_pnl:.2f}")
+                    logger.debug(f"Position {position.market_id}: Entry=${position.entry_price:.3f}, Current=${current_price:.3f}, Profit={profit_pct:.1%}, Target={current_threshold:.1%}, PnL=${unrealized_pnl:.2f}")
                     
                     # Check if we should place a profit-taking sell order
-                    if profit_pct >= profit_threshold:
+                    if profit_pct >= current_threshold:
                         # Calculate sell limit price (slightly below current to ensure execution)
                         sell_price = current_price * 0.98  # 2% below current price for quick execution
                         
@@ -401,13 +426,32 @@ async def place_stop_loss_orders(
                 
                 # Calculate current loss
                 if current_price > 0:
+                    # 🎯 Use position-specific stop loss if available
+                    current_stop_threshold = stop_loss_threshold
+                    if position.stop_loss_price:
+                        # Distance from entry to stop price as percentage
+                        current_stop_threshold = (position.stop_loss_price - position.entry_price) / position.entry_price
+                    
                     loss_pct = (current_price - position.entry_price) / position.entry_price
                     unrealized_pnl = (current_price - position.entry_price) * position.quantity
                     
                     # Check if we need stop-loss protection
-                    if loss_pct <= stop_loss_threshold:  # Negative loss percentage
+                    if loss_pct <= current_stop_threshold:  # Negative loss percentage
+                        
+                        # 🚨 PANIC EXIT: If loss is > 1.5x expected, dump immediately with market order
+                        # Example: Stop is -10%. Current is -16%. -0.16 < -0.10 * 1.5 (-0.15). Panic!
+                        if loss_pct <= current_stop_threshold * 1.5:
+                            logger.warning(f"🚨 PANIC EXIT TRIGGERED: {position.market_id} - Loss {loss_pct:.1%} exceeds 1.5x threshold {current_stop_threshold:.1%}!")
+                            success, exit_price = await close_position_market(position, db_manager, kalshi_client)
+                            
+                            if success:
+                                results['orders_placed'] += 1
+                                logger.info(f"✅ EMERGENCY EXIT successful at ${exit_price:.2f}")
+                            continue
+
+                        # Standard Stop Loss: Use Limit Order
                         # Calculate stop-loss sell price
-                        stop_price = position.entry_price * (1 + stop_loss_threshold * 1.1)  # Slightly more aggressive
+                        stop_price = position.entry_price * (1 + current_stop_threshold * 1.1)  # Slightly more aggressive
                         stop_price = max(0.01, stop_price)  # Ensure price is at least 1¢
                         
                         logger.info(f"🛡️ STOP LOSS TRIGGERED: {position.market_id} - {loss_pct:.1%} loss (${unrealized_pnl:.2f})")
@@ -436,3 +480,85 @@ async def place_stop_loss_orders(
     except Exception as e:
         logger.error(f"Error in stop-loss order placement: {e}")
         return results
+async def close_position_market(
+    position: Position,
+    db_manager: DatabaseManager,
+    kalshi_client: KalshiClient
+) -> Tuple[bool, float]:
+    """
+    Immediately closes a position using a market order.
+    Used for emergency exits, time-based exits, or resolution-based exits.
+    
+    Returns:
+        Tuple of (success, exit_price)
+    """
+    logger = get_trading_logger("market_exit")
+    
+    try:
+        import uuid
+        client_order_id = str(uuid.uuid4())
+        
+        # Determine side for sell order
+        # If we are long YES, we sell YES. If we are long NO, we sell NO.
+        side = position.side.lower()
+        
+        order_params = {
+            "ticker": position.market_id,
+            "client_order_id": client_order_id,
+            "side": side,
+            "action": "sell",
+            "count": position.quantity,
+            "type_": "market"
+        }
+        
+        # 🚨 FIX: Kalshi API requires exactly ONE price field
+        # For market sell orders, use 1 cent as the minimum we'll accept
+        if side == "yes":
+            order_params["yes_price"] = 1
+        else:
+            order_params["no_price"] = 1
+            
+        logger.info(f"🛑 Executing MARKET EXIT: {position.quantity} {side.upper()} for {position.market_id}")
+        
+        live_mode = getattr(settings.trading, 'live_trading_enabled', False)
+        
+        if live_mode:
+            response = await kalshi_client.place_order(**order_params)
+            
+            if response and 'order' in response:
+                order_info = response.get('order', {})
+                # Get fill price from response if available, otherwise estimate
+                if side == "yes":
+                    exit_price = order_info.get('yes_price', 0) / 100
+                else:
+                    exit_price = order_info.get('no_price', 0) / 100
+                
+                # If fill price is 0 from order response, try to fetch from market or fills
+                if exit_price <= 0:
+                    market_data = await kalshi_client.get_market(position.market_id)
+                    market_info = market_data.get('market', {})
+                    if side == "yes":
+                        exit_price = market_info.get('yes_bid', 1) / 100
+                    else:
+                        exit_price = market_info.get('no_bid', 1) / 100
+                
+                logger.info(f"✅ Market exit successful for {position.market_id} at ${exit_price:.2f}")
+                return True, exit_price
+            else:
+                logger.error(f"❌ Failed to place market exit order: {response}")
+                return False, 0.0
+        else:
+            # Simulated mode
+            market_data = await kalshi_client.get_market(position.market_id)
+            market_info = market_data.get('market', {})
+            if side == "yes":
+                exit_price = market_info.get('yes_bid', 1) / 100
+            else:
+                exit_price = market_info.get('no_bid', 1) / 100
+                
+            logger.info(f"📝 SIMULATED market exit for {position.market_id} at ${exit_price:.2f}")
+            return True, exit_price
+            
+    except Exception as e:
+        logger.error(f"❌ Error in market exit: {e}")
+        return False, 0.0

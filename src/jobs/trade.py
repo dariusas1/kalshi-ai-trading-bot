@@ -2,9 +2,10 @@
 Enhanced Trading Job - Beast Mode 🚀
 
 This job now uses the Unified Advanced Trading System that orchestrates:
-1. Market Making Strategy (40% allocation)
-2. Directional Trading with Portfolio Optimization (50% allocation)
-3. Arbitrage Detection (10% allocation)
+1. Market Making Strategy (30% allocation)
+2. Directional Trading with Portfolio Optimization (40% allocation)
+3. Quick Flip Scalping (30% allocation)
+4. Arbitrage Detection (0% by default)
 
 Key improvements:
 - No time restrictions (trade any deadline)
@@ -66,6 +67,13 @@ async def run_trading_job(
     
     try:
         logger.info("🚀 Starting Enhanced Trading Job - Beast Mode Activated!")
+
+        if not settings.trading.beast_mode_enabled:
+            logger.warning("Beast mode disabled; using legacy trading flow")
+            if settings.trading.fallback_to_legacy:
+                return await _fallback_legacy_trading()
+            logger.warning("Fallback to legacy disabled; skipping trading cycle")
+            return TradingSystemResults()
         
         # Use provided clients or create new ones
         db_manager = db_manager or DatabaseManager()
@@ -131,8 +139,11 @@ async def run_trading_job(
     except Exception as e:
         logger.error(f"Error in enhanced trading job: {e}")
         # Fallback to legacy system if unified system fails
-        logger.warning("🔄 Falling back to legacy decision-making system")
-        return await _fallback_legacy_trading()
+        if settings.trading.fallback_to_legacy:
+            logger.warning("🔄 Falling back to legacy decision-making system")
+            return await _fallback_legacy_trading()
+        logger.warning("Fallback to legacy disabled; returning empty results")
+        return TradingSystemResults()
 
 
 async def _fallback_legacy_trading() -> Optional[TradingSystemResults]:
@@ -151,8 +162,8 @@ async def _fallback_legacy_trading() -> Optional[TradingSystemResults]:
         
         # Get eligible markets
         markets = await db_manager.get_eligible_markets(
-            volume_min=20000,  # Balanced volume for actual trading opportunities
-            max_days_to_expiry=365  # Accept any timeline with dynamic exits
+            volume_min=settings.trading.min_volume,
+            max_days_to_expiry=settings.trading.max_time_to_expiry_days,
         )
         if not markets:
             logger.warning("No eligible markets found")
@@ -162,7 +173,8 @@ async def _fallback_legacy_trading() -> Optional[TradingSystemResults]:
         positions_created = 0
         total_exposure = 0.0
         
-        for market in markets[:5]:  # Limit to top 5 to control costs
+        max_markets = min(len(markets), settings.trading.max_opportunities_per_batch)
+        for market in markets[:max_markets]:
             try:
                 # Make decision
                 position = await make_decision_for_market(
@@ -170,6 +182,13 @@ async def _fallback_legacy_trading() -> Optional[TradingSystemResults]:
                 )
                 
                 if position:
+                    position_id = await db_manager.add_position(position)
+                    if position_id is None:
+                        logger.info(f"⏭️ Legacy: Position already exists for {market.market_id}")
+                        continue
+
+                    position.id = position_id
+
                     # Execute position with correct argument order
                     live_mode = getattr(settings.trading, 'live_trading_enabled', False)
                     success = await execute_position(

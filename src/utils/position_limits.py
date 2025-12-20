@@ -62,14 +62,19 @@ class PositionLimitsManager:
         self.kalshi_client = kalshi_client
         self.logger = get_trading_logger("position_limits")
         
-        # INCREASED: More aggressive limits for more opportunities
-        self.max_positions = 15  # INCREASED: Allow 15 positions (was 10)
-        self.max_position_size_pct = 5.0  # INCREASED: 5% max per trade (was 3%)
-        self.warning_threshold = self.max_positions - 3  # Warning at 12 positions
+        # Settings-driven limits (configurable via TradingConfig)
+        self.max_positions = settings.trading.max_positions
+        self.max_position_size_pct = settings.trading.max_position_size_pct
+        if settings.trading.max_position_size_pct_override is not None:
+            self.max_position_size_pct = settings.trading.max_position_size_pct_override
+        warning_default = max(1, self.max_positions - 3)
+        self.warning_threshold = min(
+            settings.trading.warning_positions_threshold, warning_default
+        )
         
-        # Additional safety limits - MORE AGGRESSIVE FOR FULL PORTFOLIO USE
-        self.emergency_position_limit = 20  # INCREASED: Higher emergency threshold (was 15)
-        self.min_cash_reserve_pct = 0.5  # DECREASED: Only 0.5% cash reserves (was 1% - nearly full deployment)
+        # Additional safety limits
+        self.emergency_position_limit = settings.trading.emergency_position_limit
+        self.min_cash_reserve_pct = settings.trading.min_cash_reserve_pct
         
     async def check_position_limits(
         self,

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional
 from src.utils.database import DatabaseManager
 from src.utils.logging_setup import get_trading_logger
+from src.config.settings import settings
 
 
 @dataclass
@@ -55,31 +56,35 @@ class DynamicAllocationManager:
         self.db_manager = db_manager
         self.logger = get_trading_logger("dynamic_allocation")
     
-    async def get_dynamic_allocation(self) -> StrategyAllocation:
+    async def get_dynamic_allocation(self, baseline: Optional[StrategyAllocation] = None) -> StrategyAllocation:
         """
         Calculate dynamic allocation based on strategy performance.
         
+        Args:
+            baseline: Optional user-defined baseline to fall back to.
+            
         Returns:
             StrategyAllocation with adjusted percentages based on win rates and PnL.
         """
+        fallback = baseline or self.BASELINE
         try:
             # Get performance metrics by strategy
             performance = await self.db_manager.get_performance_by_strategy()
             
             if not performance:
                 self.logger.info("📊 No strategy performance data - using baseline allocation")
-                return self.BASELINE
+                return fallback
             
             # Check if we have enough trades for any strategy
             total_trades = sum(p.get('completed_trades', 0) for p in performance.values())
             if total_trades < self.MIN_TRADES_FOR_ADJUSTMENT:
                 self.logger.info(f"📊 Insufficient trade history ({total_trades} trades) - using baseline allocation")
-                return self.BASELINE
+                return fallback
             
             # Calculate performance scores for each strategy
             scores = self._calculate_performance_scores(performance)
             
-            # Convert scores to allocations
+            # Convert scores to allocations (passing fallback for bounds)
             allocation = self._scores_to_allocation(scores)
             
             self.logger.info(
@@ -93,7 +98,7 @@ class DynamicAllocationManager:
             
         except Exception as e:
             self.logger.error(f"Error calculating dynamic allocation: {e}")
-            return self.BASELINE
+            return fallback
     
     def _calculate_performance_scores(self, performance: Dict) -> Dict[str, float]:
         """
@@ -133,6 +138,13 @@ class DynamicAllocationManager:
             
             # Composite score: 60% win rate, 40% PnL
             score = (smoothed_win_rate * 0.6) + (normalized_pnl * 0.4)
+
+            # Performance gating for underperforming strategies
+            if trades >= self.MIN_TRADES_FOR_ADJUSTMENT:
+                min_win = getattr(settings.trading, "min_strategy_win_rate", 0.45)
+                min_pnl = getattr(settings.trading, "min_strategy_pnl", 0.0)
+                if win_rate < min_win or total_pnl < min_pnl:
+                    score = min(score, 0.2)
             
             # Aggregate scores for strategies that map to same allocation
             if allocation_strategy in scores:
@@ -189,15 +201,19 @@ class DynamicAllocationManager:
         )
 
 
-async def get_dynamic_strategy_allocation(db_manager: DatabaseManager) -> StrategyAllocation:
+async def get_dynamic_strategy_allocation(
+    db_manager: DatabaseManager, 
+    baseline: Optional[StrategyAllocation] = None
+) -> StrategyAllocation:
     """
     Convenience function to get dynamic allocation.
     
     Args:
         db_manager: Database manager instance
+        baseline: Optional baseline allocation to use if insufficient data
         
     Returns:
         StrategyAllocation with performance-based percentages
     """
     manager = DynamicAllocationManager(db_manager)
-    return await manager.get_dynamic_allocation()
+    return await manager.get_dynamic_allocation(baseline=baseline)

@@ -59,15 +59,15 @@ class CashReservesManager:
         self.kalshi_client = kalshi_client
         self.logger = get_trading_logger("cash_reserves")
         
-        # UPDATED: Minimal cash reserve requirements for maximum deployment
-        self.minimum_reserve_pct = 0.5       # DECREASED: Only 0.5% minimum (was 1%)
-        self.optimal_reserve_pct = 1.0       # DECREASED: Only 1% optimal target (was 2%)
-        self.emergency_threshold_pct = 0.2   # DECREASED: 0.2% emergency halt (was 0.5%)
-        self.critical_threshold_pct = 0.05   # DECREASED: 0.05% critical threshold (was 0.1%)
+        # Settings-driven cash reserve requirements
+        self.minimum_reserve_pct = settings.trading.minimum_reserve_pct
+        self.optimal_reserve_pct = settings.trading.optimal_reserve_pct
+        self.emergency_threshold_pct = settings.trading.emergency_threshold_pct
+        self.critical_threshold_pct = settings.trading.critical_threshold_pct
         
-        # Additional safety parameters - MORE AGGRESSIVE
-        self.max_single_trade_impact = 5.0   # INCREASED: Allow 5% portfolio impact per trade (was 3%)
-        self.buffer_for_opportunities = 0.5  # DECREASED: Only 0.5% buffer (was 1%)
+        # Additional safety parameters
+        self.max_single_trade_impact = settings.trading.max_single_trade_impact
+        self.buffer_for_opportunities = settings.trading.buffer_for_opportunities
         
     async def check_cash_reserves(
         self,
@@ -114,7 +114,7 @@ class CashReservesManager:
                 emergency_status = True
                 reason = f"EMERGENCY: Cash reserves {current_reserve_pct:.1f}% below emergency threshold {self.emergency_threshold_pct:.1f}%"
                 recommendations.append("Close 2-3 positions immediately")
-                recommendations.append("Suspend new trading until above 15%")
+                recommendations.append(f"Suspend new trading until above {self.minimum_reserve_pct:.1f}%")
                 
             elif reserve_after_trade < self.minimum_reserve_pct:
                 can_trade = False

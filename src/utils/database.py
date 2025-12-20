@@ -4,8 +4,10 @@ Database manager for the Kalshi trading system.
 
 import aiosqlite
 from dataclasses import dataclass, asdict
+import logging
+import json
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 
 from src.utils.logging_setup import TradingLoggerMixin
 
@@ -76,6 +78,41 @@ class LLMQuery:
     decision_extracted: Optional[str] = None  # Decision if extracted
     id: Optional[int] = None
 
+@dataclass
+class ModelPerformance:
+    """Represents performance metrics for AI models."""
+    model_name: str  # Name of the AI model (e.g., "grok-4", "gpt-4")
+    timestamp: datetime  # When the performance was recorded
+    market_category: str  # Category of market (e.g., "technology", "finance")
+    accuracy_score: float  # Accuracy of predictions (0-1)
+    confidence_calibration: float  # How well confidence matches actual accuracy (0-1)
+    response_time_ms: int  # Response time in milliseconds
+    cost_usd: float  # Cost in USD for this prediction
+    decision_quality: float  # Quality of the decision made (0-1)
+    id: Optional[int] = None
+
+@dataclass
+class ModelHealth:
+    """Represents health status and availability of AI models."""
+    model_name: str  # Name of the AI model
+    is_available: bool  # Whether the model is currently available
+    last_check_time: datetime  # When health was last checked
+    consecutive_failures: int  # Number of consecutive failures
+    avg_response_time: float  # Average response time in milliseconds
+    id: Optional[int] = None
+
+@dataclass
+class EnsembleDecision:
+    """Represents an ensemble decision made by multiple models."""
+    market_id: str  # ID of the market being decided on
+    models_consulted: List[str]  # List of models that were consulted
+    final_decision: str  # Final decision ("YES", "NO", or "SKIP")
+    disagreement_level: float  # Level of disagreement among models (0-1)
+    selected_model: str  # Which model's decision was selected
+    reasoning: str  # Explanation for the decision
+    timestamp: datetime = None  # When decision was made
+    id: Optional[int] = None
+
 
 class DatabaseManager(TradingLoggerMixin):
     """Manages database operations for the trading system."""
@@ -88,6 +125,8 @@ class DatabaseManager(TradingLoggerMixin):
     async def initialize(self) -> None:
         """Initialize database schema and run migrations."""
         async with aiosqlite.connect(self.db_path) as db:
+            # Enable WAL mode for concurrent access
+            await db.execute("PRAGMA journal_mode=WAL;")
             await self._create_tables(db)
             await self._run_migrations(db)
             await db.commit()
@@ -136,9 +175,33 @@ class DatabaseManager(TradingLoggerMixin):
                     )
                 """)
                 
-                            # Migration 4: Update existing positions with strategy based on rationale
+            # Migration 4: Add missing columns for enhanced exit strategy
+            cursor = await db.execute("PRAGMA table_info(positions)")
+            positions_columns = await cursor.fetchall()
+            positions_column_names = [col[1] for col in positions_columns]
+
+            if 'stop_loss_price' not in positions_column_names:
+                await db.execute("ALTER TABLE positions ADD COLUMN stop_loss_price REAL")
+                self.logger.info("Added stop_loss_price column to positions table")
+            if 'take_profit_price' not in positions_column_names:
+                await db.execute("ALTER TABLE positions ADD COLUMN take_profit_price REAL")
+                self.logger.info("Added take_profit_price column to positions table")
+            if 'max_hold_hours' not in positions_column_names:
+                await db.execute("ALTER TABLE positions ADD COLUMN max_hold_hours INTEGER")
+                self.logger.info("Added max_hold_hours column to positions table")
+            if 'target_confidence_change' not in positions_column_names:
+                await db.execute("ALTER TABLE positions ADD COLUMN target_confidence_change REAL")
+                self.logger.info("Added target_confidence_change column to positions table")
+            if 'trailing_stop_price' not in positions_column_names:
+                await db.execute("ALTER TABLE positions ADD COLUMN trailing_stop_price REAL")
+                self.logger.info("Added trailing_stop_price column to positions table")
+
+            # Migration 5: Update existing positions with strategy based on rationale
             await self._migrate_existing_strategy_data(db)
-            
+
+            # Migration 6: Add model performance tracking tables
+            await self._create_model_performance_tables(db)
+
         except Exception as e:
             self.logger.error(f"Error running migrations: {e}")
 
@@ -213,6 +276,86 @@ class DatabaseManager(TradingLoggerMixin):
             
         except Exception as e:
             self.logger.error(f"Error migrating existing strategy data: {e}")
+
+    async def _create_model_performance_tables(self, db: aiosqlite.Connection) -> None:
+        """Create tables for model performance tracking."""
+        try:
+            # Check if model_performance table exists
+            cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='model_performance'")
+            table_exists = await cursor.fetchone()
+
+            if not table_exists:
+                self.logger.info("Creating model_performance table")
+                await db.execute("""
+                    CREATE TABLE model_performance (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        model_name TEXT NOT NULL,
+                        timestamp TEXT NOT NULL,
+                        market_category TEXT NOT NULL,
+                        accuracy_score REAL NOT NULL,
+                        confidence_calibration REAL NOT NULL,
+                        response_time_ms INTEGER NOT NULL,
+                        cost_usd REAL NOT NULL,
+                        decision_quality REAL NOT NULL
+                    )
+                """)
+
+                # Create indexes for performance queries
+                await db.execute("CREATE INDEX idx_model_performance_model_name ON model_performance(model_name)")
+                await db.execute("CREATE INDEX idx_model_performance_timestamp ON model_performance(timestamp)")
+                await db.execute("CREATE INDEX idx_model_performance_category ON model_performance(market_category)")
+                await db.execute("CREATE INDEX idx_model_performance_model_timestamp ON model_performance(model_name, timestamp)")
+
+            # Check if model_health table exists
+            cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='model_health'")
+            table_exists = await cursor.fetchone()
+
+            if not table_exists:
+                self.logger.info("Creating model_health table")
+                await db.execute("""
+                    CREATE TABLE model_health (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        model_name TEXT UNIQUE NOT NULL,
+                        is_available BOOLEAN NOT NULL,
+                        last_check_time TEXT NOT NULL,
+                        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                        avg_response_time REAL NOT NULL
+                    )
+                """)
+
+                # Create indexes for health queries
+                await db.execute("CREATE INDEX idx_model_health_available ON model_health(is_available)")
+                await db.execute("CREATE INDEX idx_model_health_check_time ON model_health(last_check_time)")
+
+            # Check if ensemble_decisions table exists
+            cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='ensemble_decisions'")
+            table_exists = await cursor.fetchone()
+
+            if not table_exists:
+                self.logger.info("Creating ensemble_decisions table")
+                await db.execute("""
+                    CREATE TABLE ensemble_decisions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        market_id TEXT NOT NULL,
+                        models_consulted TEXT NOT NULL,
+                        final_decision TEXT NOT NULL,
+                        disagreement_level REAL NOT NULL,
+                        selected_model TEXT NOT NULL,
+                        reasoning TEXT NOT NULL,
+                        timestamp TEXT NOT NULL
+                    )
+                """)
+
+                # Create indexes for ensemble decision queries
+                await db.execute("CREATE INDEX idx_ensemble_decisions_market_id ON ensemble_decisions(market_id)")
+                await db.execute("CREATE INDEX idx_ensemble_decisions_timestamp ON ensemble_decisions(timestamp)")
+                await db.execute("CREATE INDEX idx_ensemble_decisions_selected_model ON ensemble_decisions(selected_model)")
+
+                # Add foreign key constraints (SQLite doesn't support adding FK to existing tables easily)
+                # We'll enforce these at the application level
+
+        except Exception as e:
+            self.logger.error(f"Error creating model performance tables: {e}")
 
     async def _create_tables(self, db: aiosqlite.Connection) -> None:
         """Create all database tables."""
@@ -343,60 +486,29 @@ class DatabaseManager(TradingLoggerMixin):
         await db.execute("CREATE INDEX IF NOT EXISTS idx_market_analyses_timestamp ON market_analyses(analysis_timestamp)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_daily_cost_date ON daily_cost_tracking(date)")
         
+        # Add trading_settings table for dashboard controls
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS trading_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TEXT
+            )
+        """)
+        
+        # Add analytics_cache table for pre-computed metrics
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS analytics_cache (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                computed_at TEXT
+            )
+        """)
+        
         # Run migrations to ensure schema is up to date
         await self._run_migrations(db)
         
         self.logger.info("Tables created or already exist.")
 
-    async def _run_migrations(self, db: aiosqlite.Connection) -> None:
-        """Run database migrations to ensure schema is up to date."""
-        try:
-            # Check if positions table has the new columns
-            cursor = await db.execute("PRAGMA table_info(positions)")
-            columns = await cursor.fetchall()
-            column_names = [col[1] for col in columns]
-
-            # Add missing columns for enhanced exit strategy
-            if 'stop_loss_price' not in column_names:
-                await db.execute("ALTER TABLE positions ADD COLUMN stop_loss_price REAL")
-                self.logger.info("Added stop_loss_price column to positions table")
-
-            if 'take_profit_price' not in column_names:
-                await db.execute("ALTER TABLE positions ADD COLUMN take_profit_price REAL")
-                self.logger.info("Added take_profit_price column to positions table")
-
-            if 'max_hold_hours' not in column_names:
-                await db.execute("ALTER TABLE positions ADD COLUMN max_hold_hours INTEGER")
-                self.logger.info("Added max_hold_hours column to positions table")
-
-            if 'target_confidence_change' not in column_names:
-                await db.execute("ALTER TABLE positions ADD COLUMN target_confidence_change REAL")
-                self.logger.info("Added target_confidence_change column to positions table")
-
-            if 'trailing_stop_price' not in column_names:
-                await db.execute("ALTER TABLE positions ADD COLUMN trailing_stop_price REAL")
-                self.logger.info("Added trailing_stop_price column to positions table")
-
-            # Migration: Add unique constraint with status to prevent constraint violations
-            # when trying to create new positions for markets that only have closed positions
-            cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='index' AND name='positions_open_unique'")
-            open_index_exists = await cursor.fetchone()
-
-            if not open_index_exists:
-                # Create a unique index that allows same market+side with different statuses
-                # but prevents duplicate open positions
-                try:
-                    await db.execute("CREATE UNIQUE INDEX positions_open_unique ON positions(market_id, side, status)")
-                    self.logger.info("Added unique index with status to prevent constraint violations")
-                except Exception as e:
-                    # If the index creation fails due to existing constraint conflicts,
-                    # we'll handle it in the add_position method
-                    self.logger.warning(f"Could not create positions_open_unique index: {e}")
-
-            await db.commit()
-
-        except Exception as e:
-            self.logger.error(f"Error running migrations: {e}")
 
     async def upsert_markets(self, markets: List[Market]):
         """
@@ -577,9 +689,29 @@ class DatabaseManager(TradingLoggerMixin):
             status: The new status ('closed', 'voided').
         """
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("""
-                UPDATE positions SET status = ? WHERE id = ?
-            """, (status, position_id))
+            cursor = await db.execute(
+                "SELECT market_id FROM positions WHERE id = ?",
+                (position_id,)
+            )
+            row = await cursor.fetchone()
+            market_id = row[0] if row else None
+
+            await db.execute(
+                "UPDATE positions SET status = ? WHERE id = ?",
+                (status, position_id)
+            )
+
+            if market_id and status != "open":
+                cursor = await db.execute(
+                    "SELECT COUNT(*) FROM positions WHERE market_id = ? AND status = 'open'",
+                    (market_id,)
+                )
+                open_count = (await cursor.fetchone())[0]
+                if open_count == 0:
+                    await db.execute(
+                        "UPDATE markets SET has_position = 0 WHERE market_id = ?",
+                        (market_id,)
+                    )
             await db.commit()
             self.logger.info(f"Updated position {position_id} status to {status}.")
 
@@ -964,6 +1096,34 @@ class DatabaseManager(TradingLoggerMixin):
             row = await cursor.fetchone()
             return row[0] if row else 0.0
 
+    async def get_daily_ai_cost_breakdown(self, date: str = None) -> Dict[str, Any]:
+        """Get detailed AI cost breakdown for a specific date."""
+        if date is None:
+            date = datetime.now().strftime('%Y-%m-%d')
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("""
+                SELECT total_ai_cost, analysis_count 
+                FROM daily_cost_tracking 
+                WHERE date = ?
+            """, (date,))
+            row = await cursor.fetchone()
+            
+            if row:
+                total_cost = row['total_ai_cost']
+                count = row['analysis_count']
+                return {
+                    'total_cost': total_cost,
+                    'request_count': count,
+                    'avg_cost': total_cost / count if count > 0 else 0.0
+                }
+            return {
+                'total_cost': 0.0,
+                'request_count': 0,
+                'avg_cost': 0.0
+            }
+
     async def get_market_analysis_count_today(self, market_id: str) -> int:
         """Get number of times market was analyzed today."""
         today = datetime.now().strftime('%Y-%m-%d')
@@ -1124,11 +1284,12 @@ class DatabaseManager(TradingLoggerMixin):
                     live=bool(row[8]),
                     status=row[9],
                     id=row[0],
-                    stop_loss_price=row[10],
-                    take_profit_price=row[11],
-                    max_hold_hours=row[12],
-                    target_confidence_change=row[13],
-                    trailing_stop_price=row[14]
+                    strategy=row[10],
+                    stop_loss_price=row[11],
+                    take_profit_price=row[12],
+                    max_hold_hours=row[13],
+                    target_confidence_change=row[14],
+                    trailing_stop_price=row[15]
                 )
                 positions.append(position)
             
@@ -1150,13 +1311,17 @@ class DatabaseManager(TradingLoggerMixin):
         try:
             # Get positions from Kalshi
             response = await kalshi_client.get_positions()
-            kalshi_positions = response.get('market_positions', [])
+            kalshi_positions = (
+                response.get('market_positions')
+                or response.get('positions')
+                or []
+            )
             
             # Build set of active Kalshi positions (tickers with non-zero quantity)
             kalshi_active = set()
             for pos in kalshi_positions:
-                ticker = pos.get('ticker', '')
-                position_qty = pos.get('position', 0)
+                ticker = pos.get('ticker') or pos.get('market_id', '')
+                position_qty = pos.get('position', pos.get('quantity', 0))
                 if abs(position_qty) > 0:
                     kalshi_active.add(ticker)
             
@@ -1186,3 +1351,1280 @@ class DatabaseManager(TradingLoggerMixin):
         except Exception as e:
             self.logger.error(f"Error syncing with Kalshi: {e}")
             return {'error': str(e)}
+
+    # ==================== DASHBOARD ANALYTICS METHODS ====================
+
+    async def get_pnl_by_period(self, period: str = 'today') -> Dict:
+        """
+        Get P&L metrics for a specific time period.
+        
+        Args:
+            period: 'today', 'week', 'month', or 'all'
+            
+        Returns:
+            Dict with pnl, trades, wins, losses, win_rate
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            
+            # Build date filter based on period
+            if period == 'today':
+                date_filter = "DATE(exit_timestamp) = DATE('now')"
+            elif period == 'week':
+                date_filter = "DATE(exit_timestamp) >= DATE('now', '-7 days')"
+            elif period == 'month':
+                date_filter = "DATE(exit_timestamp) >= DATE('now', '-30 days')"
+            else:  # 'all'
+                date_filter = "1=1"
+            
+            cursor = await db.execute(f"""
+                SELECT 
+                    COUNT(*) as total_trades,
+                    COALESCE(SUM(pnl), 0) as total_pnl,
+                    COALESCE(SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END), 0) as wins,
+                    COALESCE(SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END), 0) as losses,
+                    COALESCE(AVG(pnl), 0) as avg_pnl,
+                    COALESCE(MAX(pnl), 0) as best_trade,
+                    COALESCE(MIN(pnl), 0) as worst_trade
+                FROM trade_logs
+                WHERE {date_filter}
+            """)
+            row = await cursor.fetchone()
+            
+            if row and row['total_trades'] > 0:
+                win_rate = (row['wins'] / row['total_trades']) * 100
+            else:
+                win_rate = 0.0
+            
+            return {
+                'period': period,
+                'total_pnl': row['total_pnl'] if row else 0.0,
+                'total_trades': row['total_trades'] if row else 0,
+                'wins': row['wins'] if row else 0,
+                'losses': row['losses'] if row else 0,
+                'win_rate': win_rate,
+                'avg_pnl': row['avg_pnl'] if row else 0.0,
+                'best_trade': row['best_trade'] if row else 0.0,
+                'worst_trade': row['worst_trade'] if row else 0.0
+            }
+
+    async def get_recent_trades(self, limit: int = 50) -> List[Dict]:
+        """Get recent trade executions for the trade feed."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("""
+                SELECT 
+                    market_id, side, entry_price, exit_price, quantity, 
+                    pnl, exit_timestamp, strategy
+                FROM trade_logs 
+                ORDER BY exit_timestamp DESC 
+                LIMIT ?
+            """, (limit,))
+            rows = await cursor.fetchall()
+            
+            return [dict(row) for row in rows]
+
+    async def get_setting(self, key: str, default: str = None) -> Optional[str]:
+        """Get a trading setting value."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT value FROM trading_settings WHERE key = ?", (key,)
+            )
+            row = await cursor.fetchone()
+            return row[0] if row else default
+
+    async def set_setting(self, key: str, value: str) -> None:
+        """Set a trading setting value."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                INSERT INTO trading_settings (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = ?
+            """, (key, value, datetime.now().isoformat(), value, datetime.now().isoformat()))
+            await db.commit()
+
+    async def get_category_performance(self) -> Dict[str, Dict]:
+        """Get win rate and P&L broken down by market category."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            
+            # Join trade_logs with markets to get category
+            cursor = await db.execute("""
+                SELECT 
+                    m.category,
+                    COUNT(*) as trades,
+                    SUM(CASE WHEN t.pnl > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(t.pnl) as total_pnl,
+                    AVG(t.pnl) as avg_pnl
+                FROM trade_logs t
+                LEFT JOIN markets m ON t.market_id = m.market_id
+                WHERE m.category IS NOT NULL
+                GROUP BY m.category
+                ORDER BY SUM(t.pnl) DESC
+            """)
+            rows = await cursor.fetchall()
+            
+            result = {}
+            for row in rows:
+                category = row['category'] or 'unknown'
+                trades = row['trades']
+                wins = row['wins'] or 0
+                result[category] = {
+                    'trades': trades,
+                    'wins': wins,
+                    'losses': trades - wins,
+                    'win_rate': (wins / trades * 100) if trades > 0 else 0,
+                    'total_pnl': row['total_pnl'] or 0,
+                    'avg_pnl': row['avg_pnl'] or 0
+                }
+            return result
+
+    async def get_hourly_performance(self) -> Dict[int, Dict]:
+        """Get win rate and P&L broken down by hour of day."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            
+            cursor = await db.execute("""
+                SELECT 
+                    CAST(strftime('%H', exit_timestamp) AS INTEGER) as hour,
+                    COUNT(*) as trades,
+                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(pnl) as total_pnl,
+                    AVG(pnl) as avg_pnl
+                FROM trade_logs
+                GROUP BY hour
+                ORDER BY hour
+            """)
+            rows = await cursor.fetchall()
+            
+            result = {}
+            for row in rows:
+                hour = row['hour']
+                trades = row['trades']
+                wins = row['wins'] or 0
+                result[hour] = {
+                    'trades': trades,
+                    'wins': wins,
+                    'win_rate': (wins / trades * 100) if trades > 0 else 0,
+                    'total_pnl': row['total_pnl'] or 0,
+                    'avg_pnl': row['avg_pnl'] or 0
+                }
+            return result
+
+    async def get_expiry_performance(self) -> Dict[str, Dict]:
+        """Get win rate and P&L broken down by time-to-expiry bucket."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            
+            # Calculate hours to expiry at entry time
+            cursor = await db.execute("""
+                SELECT 
+                    CASE 
+                        WHEN (m.expiration_ts - strftime('%s', t.entry_timestamp)) / 3600.0 < 1 THEN '0-1h'
+                        WHEN (m.expiration_ts - strftime('%s', t.entry_timestamp)) / 3600.0 < 6 THEN '1-6h'
+                        WHEN (m.expiration_ts - strftime('%s', t.entry_timestamp)) / 3600.0 < 24 THEN '6-24h'
+                        WHEN (m.expiration_ts - strftime('%s', t.entry_timestamp)) / 3600.0 < 168 THEN '1-7d'
+                        ELSE '7d+'
+                    END as expiry_bucket,
+                    COUNT(*) as trades,
+                    SUM(CASE WHEN t.pnl > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(t.pnl) as total_pnl,
+                    AVG(t.pnl) as avg_pnl
+                FROM trade_logs t
+                LEFT JOIN markets m ON t.market_id = m.market_id
+                WHERE m.expiration_ts IS NOT NULL
+                GROUP BY expiry_bucket
+            """)
+            rows = await cursor.fetchall()
+            
+            result = {}
+            for row in rows:
+                bucket = row['expiry_bucket'] or 'unknown'
+                trades = row['trades']
+                wins = row['wins'] or 0
+                result[bucket] = {
+                    'trades': trades,
+                    'wins': wins,
+                    'win_rate': (wins / trades * 100) if trades > 0 else 0,
+                    'total_pnl': row['total_pnl'] or 0,
+                    'avg_pnl': row['avg_pnl'] or 0
+                }
+            return result
+
+    async def get_confidence_calibration(self) -> List[Dict]:
+        """
+        Get confidence calibration data showing predicted vs actual win rates.
+        
+        Returns list of buckets: {range, avg_confidence, actual_win_rate, trades}
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            
+            cursor = await db.execute("""
+                SELECT 
+                    CASE 
+                        WHEN p.confidence < 0.6 THEN '50-60%'
+                        WHEN p.confidence < 0.7 THEN '60-70%'
+                        WHEN p.confidence < 0.8 THEN '70-80%'
+                        WHEN p.confidence < 0.9 THEN '80-90%'
+                        ELSE '90-100%'
+                    END as bucket,
+                    AVG(p.confidence) as avg_confidence,
+                    COUNT(*) as trades,
+                    SUM(CASE WHEN t.pnl > 0 THEN 1 ELSE 0 END) as wins
+                FROM positions p
+                JOIN trade_logs t ON p.market_id = t.market_id AND p.side = t.side
+                WHERE p.confidence IS NOT NULL
+                GROUP BY bucket
+                ORDER BY avg_confidence
+            """)
+            rows = await cursor.fetchall()
+            
+            result = []
+            for row in rows:
+                trades = row['trades']
+                wins = row['wins'] or 0
+                result.append({
+                    'bucket': row['bucket'],
+                    'avg_confidence': (row['avg_confidence'] or 0) * 100,
+                    'actual_win_rate': (wins / trades * 100) if trades > 0 else 0,
+                    'trades': trades
+                })
+            return result
+
+    async def get_daily_pnl_history(self, days: int = 30) -> List[Dict]:
+        """Get daily P&L for calendar view."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            
+            cursor = await db.execute("""
+                SELECT 
+                    DATE(exit_timestamp) as date,
+                    SUM(pnl) as pnl,
+                    COUNT(*) as trades,
+                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins
+                FROM trade_logs
+                WHERE DATE(exit_timestamp) >= DATE('now', ?)
+                GROUP BY DATE(exit_timestamp)
+                ORDER BY date DESC
+            """, (f'-{days} days',))
+            rows = await cursor.fetchall()
+            
+            return [dict(row) for row in rows]
+
+    async def get_trading_streaks(self) -> Dict:
+        """Get current and max win/loss streaks."""
+        trades = await self.get_recent_trades(limit=500)
+        
+        if not trades:
+            return {'current_streak': 0, 'streak_type': 'none', 
+                    'max_win_streak': 0, 'max_loss_streak': 0}
+        
+        current_streak = 0
+        streak_type = 'none'
+        max_win_streak = 0
+        max_loss_streak = 0
+        temp_win = 0
+        temp_loss = 0
+        
+        for trade in trades:
+            pnl = trade.get('pnl', 0)
+            
+            if pnl > 0:
+                temp_win += 1
+                if temp_loss > max_loss_streak:
+                    max_loss_streak = temp_loss
+                temp_loss = 0
+            else:
+                temp_loss += 1
+                if temp_win > max_win_streak:
+                    max_win_streak = temp_win
+                temp_win = 0
+        
+        # Check final streaks
+        if temp_win > max_win_streak:
+            max_win_streak = temp_win
+        if temp_loss > max_loss_streak:
+            max_loss_streak = temp_loss
+        
+        # Current streak from most recent trades
+        if trades:
+            first_pnl = trades[0].get('pnl', 0)
+            streak_type = 'win' if first_pnl > 0 else 'loss'
+            current_streak = 1
+            for trade in trades[1:]:
+                if (trade.get('pnl', 0) > 0) == (first_pnl > 0):
+                    current_streak += 1
+                else:
+                    break
+        
+        return {
+            'current_streak': current_streak,
+            'streak_type': streak_type,
+            'max_win_streak': max_win_streak,
+            'max_loss_streak': max_loss_streak
+        }
+
+    async def get_ai_cost_history(self, days: int = 30) -> List[Dict]:
+        """
+        Get daily AI cost history for the last N days.
+        
+        Returns:
+            List of dicts with 'date' and 'cost'.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("""
+                SELECT date, total_ai_cost as cost 
+                FROM daily_cost_tracking 
+                ORDER BY date DESC 
+                LIMIT ?
+            """, (days,))
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_cached_analytics(self, key: str) -> Optional[Dict]:
+        """
+        Get cached analytics data by key.
+        
+        Returns:
+            Dict of data or None if not found or expired (> 15 mins).
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("""
+                SELECT value, computed_at FROM analytics_cache WHERE key = ?
+            """, (key,))
+            row = await cursor.fetchone()
+            
+            if row:
+                # Check expiry (optional, processor runs every 5 mins)
+                computed_at = datetime.fromisoformat(row['computed_at'])
+                if (datetime.now() - computed_at).total_seconds() < 900:  # 15 mins
+                    return json.loads(row['value'])
+            return None
+
+    async def set_cached_analytics(self, key: str, value: Dict) -> None:
+        """Set cached analytics data by key."""
+        try:
+            payload = json.dumps(value)
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    "INSERT OR REPLACE INTO analytics_cache (key, value, computed_at) VALUES (?, ?, ?)",
+                    (key, payload, datetime.now().isoformat())
+                )
+                await db.commit()
+        except Exception as e:
+            self.logger.error(f"Error setting analytics cache for {key}: {e}")
+
+    # ==================== MODEL PERFORMANCE TRACKING METHODS ====================
+
+    async def save_model_performance(self, performance: ModelPerformance) -> Optional[int]:
+        """Save a model performance record to the database."""
+        try:
+            performance_dict = asdict(performance)
+            performance_dict['timestamp'] = performance.timestamp.isoformat()
+
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute("""
+                    INSERT INTO model_performance (
+                        model_name, timestamp, market_category, accuracy_score,
+                        confidence_calibration, response_time_ms, cost_usd, decision_quality
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    performance.model_name,
+                    performance.timestamp.isoformat(),
+                    performance.market_category,
+                    performance.accuracy_score,
+                    performance.confidence_calibration,
+                    performance.response_time_ms,
+                    performance.cost_usd,
+                    performance.decision_quality
+                ))
+                await db.commit()
+
+                record_id = cursor.lastrowid
+                self.logger.info(f"Saved model performance record for {performance.model_name}")
+                return record_id
+
+        except Exception as e:
+            self.logger.error(f"Error saving model performance: {e}")
+            return None
+
+    async def get_model_performance_by_id(self, record_id: int) -> Optional[ModelPerformance]:
+        """Get a model performance record by ID."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(
+                    "SELECT * FROM model_performance WHERE id = ?",
+                    (record_id,)
+                )
+                row = await cursor.fetchone()
+
+                if row:
+                    return ModelPerformance(
+                        model_name=row['model_name'],
+                        timestamp=datetime.fromisoformat(row['timestamp']),
+                        market_category=row['market_category'],
+                        accuracy_score=row['accuracy_score'],
+                        confidence_calibration=row['confidence_calibration'],
+                        response_time_ms=row['response_time_ms'],
+                        cost_usd=row['cost_usd'],
+                        decision_quality=row['decision_quality'],
+                        id=row['id']
+                    )
+                return None
+
+        except Exception as e:
+            self.logger.error(f"Error getting model performance record {record_id}: {e}")
+            return None
+
+    async def get_model_performance_by_model(self, model_name: str, limit: int = 100) -> List[ModelPerformance]:
+        """Get model performance records for a specific model."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute("""
+                    SELECT * FROM model_performance
+                    WHERE model_name = ?
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                """, (model_name, limit))
+                rows = await cursor.fetchall()
+
+                return [
+                    ModelPerformance(
+                        model_name=row['model_name'],
+                        timestamp=datetime.fromisoformat(row['timestamp']),
+                        market_category=row['market_category'],
+                        accuracy_score=row['accuracy_score'],
+                        confidence_calibration=row['confidence_calibration'],
+                        response_time_ms=row['response_time_ms'],
+                        cost_usd=row['cost_usd'],
+                        decision_quality=row['decision_quality'],
+                        id=row['id']
+                    )
+                    for row in rows
+                ]
+
+        except Exception as e:
+            self.logger.error(f"Error getting model performance for {model_name}: {e}")
+            return []
+
+    async def get_model_performance_aggregation(self, model_name: str, window_hours: int = 24) -> Optional[Dict]:
+        """Get aggregated performance metrics for a model over a time window."""
+        try:
+            cutoff_time = datetime.now() - timedelta(hours=window_hours)
+
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute("""
+                    SELECT
+                        COUNT(*) as record_count,
+                        AVG(accuracy_score) as avg_accuracy,
+                        AVG(confidence_calibration) as avg_confidence_calibration,
+                        AVG(response_time_ms) as avg_response_time,
+                        SUM(cost_usd) as total_cost,
+                        AVG(decision_quality) as avg_decision_quality,
+                        MIN(accuracy_score) as min_accuracy,
+                        MAX(accuracy_score) as max_accuracy
+                    FROM model_performance
+                    WHERE model_name = ? AND timestamp >= ?
+                """, (model_name, cutoff_time.isoformat()))
+                row = await cursor.fetchone()
+
+                if row and row['record_count'] > 0:
+                    return {
+                        'record_count': row['record_count'],
+                        'avg_accuracy': row['avg_accuracy'] or 0.0,
+                        'avg_confidence_calibration': row['avg_confidence_calibration'] or 0.0,
+                        'avg_response_time': row['avg_response_time'] or 0.0,
+                        'total_cost': row['total_cost'] or 0.0,
+                        'avg_decision_quality': row['avg_decision_quality'] or 0.0,
+                        'min_accuracy': row['min_accuracy'] or 0.0,
+                        'max_accuracy': row['max_accuracy'] or 0.0
+                    }
+                return None
+
+        except Exception as e:
+            self.logger.error(f"Error getting model performance aggregation for {model_name}: {e}")
+            return None
+
+    async def get_model_cost_today(self, model_name: str) -> float:
+        """Get total cost for a model today."""
+        try:
+            today = datetime.now().strftime('%Y-%m-%d')
+
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute("""
+                    SELECT COALESCE(SUM(cost_usd), 0) as total_cost
+                    FROM model_performance
+                    WHERE model_name = ? AND DATE(timestamp) = ?
+                """, (model_name, today))
+                row = await cursor.fetchone()
+                return row[0] if row else 0.0
+
+        except Exception as e:
+            self.logger.error(f"Error getting model cost for {model_name}: {e}")
+            return 0.0
+
+    async def get_all_model_costs_today(self) -> Dict[str, float]:
+        """Get total costs for all models today."""
+        try:
+            today = datetime.now().strftime('%Y-%m-%d')
+
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute("""
+                    SELECT model_name, SUM(cost_usd) as total_cost
+                    FROM model_performance
+                    WHERE DATE(timestamp) = ?
+                    GROUP BY model_name
+                """, (today,))
+                rows = await cursor.fetchall()
+
+                return {row['model_name']: row['total_cost'] or 0.0 for row in rows}
+
+        except Exception as e:
+            self.logger.error(f"Error getting all model costs: {e}")
+            return {}
+
+    async def check_model_budget(self, model_name: str, daily_budget: float) -> bool:
+        """Check if a model is within its daily budget."""
+        try:
+            today_cost = await self.get_model_cost_today(model_name)
+            return today_cost <= daily_budget
+
+        except Exception as e:
+            self.logger.error(f"Error checking model budget for {model_name}: {e}")
+            return False
+
+    # ==================== MODEL HEALTH MONITORING METHODS ====================
+
+    async def update_model_health(self, health: ModelHealth) -> bool:
+        """Update or insert model health status."""
+        try:
+            health_dict = asdict(health)
+            health_dict['last_check_time'] = health.last_check_time.isoformat()
+
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("""
+                    INSERT OR REPLACE INTO model_health (
+                        model_name, is_available, last_check_time, consecutive_failures, avg_response_time
+                    ) VALUES (?, ?, ?, ?, ?)
+                """, (
+                    health.model_name,
+                    health.is_available,
+                    health.last_check_time.isoformat(),
+                    health.consecutive_failures,
+                    health.avg_response_time
+                ))
+                await db.commit()
+
+                self.logger.info(f"Updated model health for {health.model_name}")
+                return True
+
+        except Exception as e:
+            self.logger.error(f"Error updating model health for {health.model_name}: {e}")
+            return False
+
+    async def get_model_health(self, model_name: str) -> Optional[ModelHealth]:
+        """Get health status for a specific model."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(
+                    "SELECT * FROM model_health WHERE model_name = ?",
+                    (model_name,)
+                )
+                row = await cursor.fetchone()
+
+                if row:
+                    return ModelHealth(
+                        model_name=row['model_name'],
+                        is_available=bool(row['is_available']),
+                        last_check_time=datetime.fromisoformat(row['last_check_time']),
+                        consecutive_failures=row['consecutive_failures'],
+                        avg_response_time=row['avg_response_time'],
+                        id=row['id']
+                    )
+                return None
+
+        except Exception as e:
+            self.logger.error(f"Error getting model health for {model_name}: {e}")
+            return None
+
+    async def get_available_models(self) -> List[str]:
+        """Get list of currently available models."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute("""
+                    SELECT model_name FROM model_health
+                    WHERE is_available = 1
+                    ORDER BY model_name
+                """)
+                rows = await cursor.fetchall()
+                return [row[0] for row in rows]
+
+        except Exception as e:
+            self.logger.error(f"Error getting available models: {e}")
+            return []
+
+    # ==================== ENSEMBLE DECISION TRACKING METHODS ====================
+
+    async def save_ensemble_decision(self, decision: EnsembleDecision) -> Optional[int]:
+        """Save an ensemble decision record."""
+        try:
+            if decision.timestamp is None:
+                decision.timestamp = datetime.now()
+
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute("""
+                    INSERT INTO ensemble_decisions (
+                        market_id, models_consulted, final_decision, disagreement_level,
+                        selected_model, reasoning, timestamp
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    decision.market_id,
+                    json.dumps(decision.models_consulted),
+                    decision.final_decision,
+                    decision.disagreement_level,
+                    decision.selected_model,
+                    decision.reasoning,
+                    decision.timestamp.isoformat()
+                ))
+                await db.commit()
+
+                record_id = cursor.lastrowid
+                self.logger.info(f"Saved ensemble decision for market {decision.market_id}")
+                return record_id
+
+        except Exception as e:
+            self.logger.error(f"Error saving ensemble decision: {e}")
+            return None
+
+    async def get_ensemble_decision(self, record_id: int) -> Optional[EnsembleDecision]:
+        """Get an ensemble decision record by ID."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(
+                    "SELECT * FROM ensemble_decisions WHERE id = ?",
+                    (record_id,)
+                )
+                row = await cursor.fetchone()
+
+                if row:
+                    return EnsembleDecision(
+                        market_id=row['market_id'],
+                        models_consulted=json.loads(row['models_consulted']),
+                        final_decision=row['final_decision'],
+                        disagreement_level=row['disagreement_level'],
+                        selected_model=row['selected_model'],
+                        reasoning=row['reasoning'],
+                        timestamp=datetime.fromisoformat(row['timestamp']),
+                        id=row['id']
+                    )
+                return None
+
+        except Exception as e:
+            self.logger.error(f"Error getting ensemble decision {record_id}: {e}")
+            return None
+
+    async def get_ensemble_decisions_by_market(self, market_id: str, limit: int = 50) -> List[EnsembleDecision]:
+        """Get ensemble decisions for a specific market."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute("""
+                    SELECT * FROM ensemble_decisions
+                    WHERE market_id = ?
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                """, (market_id, limit))
+                rows = await cursor.fetchall()
+
+                return [
+                    EnsembleDecision(
+                        market_id=row['market_id'],
+                        models_consulted=json.loads(row['models_consulted']),
+                        final_decision=row['final_decision'],
+                        disagreement_level=row['disagreement_level'],
+                        selected_model=row['selected_model'],
+                        reasoning=row['reasoning'],
+                        timestamp=datetime.fromisoformat(row['timestamp']),
+                        id=row['id']
+                    )
+                    for row in rows
+                ]
+
+        except Exception as e:
+            self.logger.error(f"Error getting ensemble decisions for market {market_id}: {e}")
+            return []
+
+    async def get_ensemble_analysis(self, hours_back: int = 24) -> Optional[Dict]:
+        """Get analysis of ensemble decisions over a time period."""
+        try:
+            cutoff_time = datetime.now() - timedelta(hours=hours_back)
+
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute("""
+                    SELECT
+                        COUNT(*) as total_decisions,
+                        AVG(disagreement_level) as avg_disagreement,
+                        selected_model,
+                        COUNT(*) as times_selected
+                    FROM ensemble_decisions
+                    WHERE timestamp >= ?
+                    GROUP BY selected_model
+                    ORDER BY times_selected DESC
+                """, (cutoff_time.isoformat(),))
+                rows = await cursor.fetchall()
+
+                if rows:
+                    total_decisions = sum(row['times_selected'] for row in rows)
+                    avg_disagreement = sum(row['avg_disagreement'] * row['times_selected'] for row in rows) / total_decisions
+                    most_selected = rows[0]['selected_model']
+
+                    return {
+                        'total_decisions': total_decisions,
+                        'avg_disagreement': avg_disagreement,
+                        'most_selected_model': most_selected,
+                        'model_selection_counts': {row['selected_model']: row['times_selected'] for row in rows}
+                    }
+                return None
+
+        except Exception as e:
+            self.logger.error(f"Error getting ensemble analysis: {e}")
+            return None
+
+    async def get_model_usage_stats(self, hours_back: int = 24) -> Dict[str, Dict]:
+        """Get usage statistics for models in ensemble decisions."""
+        try:
+            cutoff_time = datetime.now() - timedelta(hours=hours_back)
+
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+
+                # Get selected model counts
+                cursor = await db.execute("""
+                    SELECT selected_model, COUNT(*) as times_selected
+                    FROM ensemble_decisions
+                    WHERE timestamp >= ?
+                    GROUP BY selected_model
+                """, (cutoff_time.isoformat(),))
+                selected_rows = await cursor.fetchall()
+
+                # Get consulted model counts
+                cursor = await db.execute("""
+                    SELECT timestamp, models_consulted
+                    FROM ensemble_decisions
+                    WHERE timestamp >= ?
+                """, (cutoff_time.isoformat(),))
+                consulted_rows = await cursor.fetchall()
+
+                # Count consultations
+                consultation_counts = {}
+                for row in consulted_rows:
+                    models = json.loads(row['models_consulted'])
+                    for model in models:
+                        consultation_counts[model] = consultation_counts.get(model, 0) + 1
+
+                # Combine stats
+                all_models = set(row['selected_model'] for row in selected_rows) | set(consultation_counts.keys())
+                stats = {}
+
+                for model in all_models:
+                    selected_count = next((r['times_selected'] for r in selected_rows if r['selected_model'] == model), 0)
+                    consulted_count = consultation_counts.get(model, 0)
+
+                    stats[model] = {
+                        'times_selected': selected_count,
+                        'times_consulted': consulted_count,
+                        'selection_rate': selected_count / consulted_count if consulted_count > 0 else 0.0
+                    }
+
+                return stats
+
+        except Exception as e:
+            self.logger.error(f"Error getting model usage stats: {e}")
+            return {}
+
+    async def get_disagreement_analysis(self, hours_back: int = 24) -> Optional[Dict]:
+        """Get analysis of disagreement levels in ensemble decisions."""
+        try:
+            cutoff_time = datetime.now() - timedelta(hours=hours_back)
+
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute("""
+                    SELECT
+                        COUNT(*) as total_decisions,
+                        AVG(disagreement_level) as avg_disagreement,
+                        COUNT(CASE WHEN disagreement_level > 0.7 THEN 1 END) as high_disagreement,
+                        COUNT(CASE WHEN disagreement_level < 0.3 THEN 1 END) as low_disagreement,
+                        MIN(disagreement_level) as min_disagreement,
+                        MAX(disagreement_level) as max_disagreement
+                    FROM ensemble_decisions
+                    WHERE timestamp >= ?
+                """, (cutoff_time.isoformat(),))
+                row = await cursor.fetchone()
+
+                if row and row['total_decisions'] > 0:
+                    return {
+                        'total_decisions': row['total_decisions'],
+                        'avg_disagreement': row['avg_disagreement'] or 0.0,
+                        'high_disagreement_decisions': row['high_disagreement'] or 0,
+                        'low_disagreement_decisions': row['low_disagreement'] or 0,
+                        'min_disagreement': row['min_disagreement'] or 0.0,
+                        'max_disagreement': row['max_disagreement'] or 0.0
+                    }
+                return None
+
+        except Exception as e:
+            self.logger.error(f"Error getting disagreement analysis: {e}")
+            return None
+
+    # ==================== DATABASE ASSOCIATION METHODS ====================
+
+    async def get_model_performance_by_category(self, market_category: str, hours_back: int = 24) -> List[ModelPerformance]:
+        """Get model performance records for a specific market category."""
+        try:
+            cutoff_time = datetime.now() - timedelta(hours=hours_back)
+
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute("""
+                    SELECT * FROM model_performance
+                    WHERE market_category = ? AND timestamp >= ?
+                    ORDER BY timestamp DESC
+                """, (market_category, cutoff_time.isoformat()))
+                rows = await cursor.fetchall()
+
+                return [
+                    ModelPerformance(
+                        model_name=row['model_name'],
+                        timestamp=datetime.fromisoformat(row['timestamp']),
+                        market_category=row['market_category'],
+                        accuracy_score=row['accuracy_score'],
+                        confidence_calibration=row['confidence_calibration'],
+                        response_time_ms=row['response_time_ms'],
+                        cost_usd=row['cost_usd'],
+                        decision_quality=row['decision_quality'],
+                        id=row['id']
+                    )
+                    for row in rows
+                ]
+
+        except Exception as e:
+            self.logger.error(f"Error getting model performance by category {market_category}: {e}")
+            return []
+
+    async def get_model_health_with_performance(self, model_name: str) -> Optional[Dict]:
+        """Get model health with recent performance summary."""
+        try:
+            # Get health status
+            health = await self.get_model_health(model_name)
+            if not health:
+                return None
+
+            # Get recent performance summary
+            performance_summary = await self.get_model_performance_aggregation(model_name, window_hours=24)
+
+            # Get today's cost
+            today_cost = await self.get_model_cost_today(model_name)
+
+            return {
+                'health': {
+                    'model_name': health.model_name,
+                    'is_available': health.is_available,
+                    'last_check_time': health.last_check_time,
+                    'consecutive_failures': health.consecutive_failures,
+                    'avg_response_time': health.avg_response_time
+                },
+                'performance_24h': performance_summary,
+                'cost_today': today_cost
+            }
+
+        except Exception as e:
+            self.logger.error(f"Error getting model health with performance for {model_name}: {e}")
+            return None
+
+    async def get_all_models_status(self) -> Dict[str, Dict]:
+        """Get comprehensive status for all models."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+
+                # Get all model names from health table
+                cursor = await db.execute("SELECT model_name FROM model_health")
+                model_names = [row[0] for row in await cursor.fetchall()]
+
+                models_status = {}
+                for model_name in model_names:
+                    status = await self.get_model_health_with_performance(model_name)
+                    if status:
+                        models_status[model_name] = status
+
+                return models_status
+
+        except Exception as e:
+            self.logger.error(f"Error getting all models status: {e}")
+            return {}
+
+    async def get_ensemble_decisions_with_market_data(self, hours_back: int = 24, limit: int = 100) -> List[Dict]:
+        """Get ensemble decisions with associated market data."""
+        try:
+            cutoff_time = datetime.now() - timedelta(hours=hours_back)
+
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute("""
+                    SELECT ed.*, m.title, m.category, m.yes_price, m.no_price, m.expiration_ts
+                    FROM ensemble_decisions ed
+                    LEFT JOIN markets m ON ed.market_id = m.market_id
+                    WHERE ed.timestamp >= ?
+                    ORDER BY ed.timestamp DESC
+                    LIMIT ?
+                """, (cutoff_time.isoformat(), limit))
+                rows = await cursor.fetchall()
+
+                return [
+                    {
+                        'decision': {
+                            'id': row['id'],
+                            'market_id': row['market_id'],
+                            'models_consulted': json.loads(row['models_consulted']),
+                            'final_decision': row['final_decision'],
+                            'disagreement_level': row['disagreement_level'],
+                            'selected_model': row['selected_model'],
+                            'reasoning': row['reasoning'],
+                            'timestamp': datetime.fromisoformat(row['timestamp'])
+                        },
+                        'market': {
+                            'title': row['title'],
+                            'category': row['category'],
+                            'yes_price': row['yes_price'],
+                            'no_price': row['no_price'],
+                            'expiration_ts': row['expiration_ts']
+                        } if row['title'] else None
+                    }
+                    for row in rows
+                ]
+
+        except Exception as e:
+            self.logger.error(f"Error getting ensemble decisions with market data: {e}")
+            return []
+
+    async def validate_foreign_keys(self) -> bool:
+        """Validate that foreign key relationships are maintained."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # Check ensemble decisions reference valid markets
+                cursor = await db.execute("""
+                    SELECT COUNT(*) as invalid_refs
+                    FROM ensemble_decisions ed
+                    LEFT JOIN markets m ON ed.market_id = m.market_id
+                    WHERE m.market_id IS NULL
+                """)
+                result = await cursor.fetchone()
+                if result[0] > 0:
+                    self.logger.warning(f"Found {result[0]} ensemble decisions with invalid market references")
+                    return False
+
+                # Check model performance records reference valid model health entries
+                cursor = await db.execute("""
+                    SELECT COUNT(*) as invalid_models
+                    FROM model_performance mp
+                    LEFT JOIN model_health mh ON mp.model_name = mh.model_name
+                    WHERE mh.model_name IS NULL
+                """)
+                result = await cursor.fetchone()
+                if result[0] > 0:
+                    self.logger.warning(f"Found {result[0]} model performance records for models without health entries")
+                    return False
+
+                self.logger.info("Foreign key validation passed")
+                return True
+
+        except Exception as e:
+            self.logger.error(f"Error validating foreign keys: {e}")
+            return False
+
+    # ==================== ADDITIONAL METHODS FOR PERFORMANCE TRACKER ====================
+
+    async def get_model_performance(
+        self,
+        model_name: str,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        market_category: Optional[str] = None,
+        limit: int = 100
+    ) -> List[ModelPerformance]:
+        """
+        Get model performance records with optional filtering.
+
+        Args:
+            model_name: Name of the model
+            start_time: Start time filter
+            end_time: End time filter
+            market_category: Market category filter
+            limit: Maximum number of records
+
+        Returns:
+            List of ModelPerformance objects
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+
+                # Build query with optional filters
+                query = "SELECT * FROM model_performance WHERE model_name = ?"
+                params = [model_name]
+
+                if start_time:
+                    query += " AND timestamp >= ?"
+                    params.append(start_time.isoformat())
+
+                if end_time:
+                    query += " AND timestamp <= ?"
+                    params.append(end_time.isoformat())
+
+                if market_category:
+                    query += " AND market_category = ?"
+                    params.append(market_category)
+
+                query += " ORDER BY timestamp DESC LIMIT ?"
+                params.append(limit)
+
+                cursor = await db.execute(query, params)
+                rows = await cursor.fetchall()
+
+                return [
+                    ModelPerformance(
+                        model_name=row['model_name'],
+                        timestamp=datetime.fromisoformat(row['timestamp']),
+                        market_category=row['market_category'],
+                        accuracy_score=row['accuracy_score'],
+                        confidence_calibration=row['confidence_calibration'],
+                        response_time_ms=row['response_time_ms'],
+                        cost_usd=row['cost_usd'],
+                        decision_quality=row['decision_quality'],
+                        id=row['id']
+                    )
+                    for row in rows
+                ]
+
+        except Exception as e:
+            self.logger.error(f"Error getting model performance for {model_name}: {e}")
+            return []
+
+    async def create_model_performance(self, performance: ModelPerformance) -> Optional[int]:
+        """
+        Create a new model performance record.
+
+        Args:
+            performance: ModelPerformance object with performance data
+
+        Returns:
+            ID of the created record, or None if failed
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute("""
+                    INSERT INTO model_performance (
+                        model_name, timestamp, market_category, accuracy_score,
+                        confidence_calibration, response_time_ms, cost_usd, decision_quality
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    performance.model_name,
+                    performance.timestamp.isoformat(),
+                    performance.market_category,
+                    performance.accuracy_score,
+                    performance.confidence_calibration,
+                    performance.response_time_ms,
+                    performance.cost_usd,
+                    performance.decision_quality
+                ))
+
+                record_id = cursor.lastrowid
+                await db.commit()
+
+                self.logger.info(f"Created model performance record for {performance.model_name}")
+                return record_id
+
+        except Exception as e:
+            self.logger.error(f"Error creating model performance record: {e}")
+            return None
+
+    async def create_ensemble_decision(self, decision: EnsembleDecision) -> Optional[int]:
+        """
+        Create a new ensemble decision record.
+
+        Args:
+            decision: EnsembleDecision object with decision data
+
+        Returns:
+            ID of the created record, or None if failed
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute("""
+                    INSERT INTO ensemble_decisions (
+                        market_id, models_consulted, final_decision, disagreement_level,
+                        selected_model, reasoning, timestamp
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    decision.market_id,
+                    json.dumps(decision.models_consulted),
+                    decision.final_decision,
+                    decision.disagreement_level,
+                    decision.selected_model,
+                    decision.reasoning,
+                    decision.timestamp.isoformat() if decision.timestamp else datetime.now().isoformat()
+                ))
+
+                record_id = cursor.lastrowid
+                await db.commit()
+
+                self.logger.info(f"Created ensemble decision record for {decision.market_id}")
+                return record_id
+
+        except Exception as e:
+            self.logger.error(f"Error creating ensemble decision record: {e}")
+            return None
+
+    async def get_model_performances(
+        self,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        model_name: Optional[str] = None,
+        market_category: Optional[str] = None,
+        limit: int = 1000
+    ) -> List[ModelPerformance]:
+        """
+        Get model performance records with optional filtering.
+
+        Args:
+            start_time: Start time filter
+            end_time: End time filter
+            model_name: Optional model name filter
+            market_category: Optional market category filter
+            limit: Maximum number of records
+
+        Returns:
+            List of ModelPerformance objects
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+
+                # Build query with optional filters
+                query = "SELECT * FROM model_performance WHERE 1=1"
+                params = []
+
+                if model_name:
+                    query += " AND model_name = ?"
+                    params.append(model_name)
+
+                if start_time:
+                    query += " AND timestamp >= ?"
+                    params.append(start_time.isoformat())
+
+                if end_time:
+                    query += " AND timestamp <= ?"
+                    params.append(end_time.isoformat())
+
+                if market_category:
+                    query += " AND market_category = ?"
+                    params.append(market_category)
+
+                query += " ORDER BY timestamp DESC LIMIT ?"
+                params.append(limit)
+
+                cursor = await db.execute(query, params)
+                rows = await cursor.fetchall()
+
+                return [
+                    ModelPerformance(
+                        model_name=row['model_name'],
+                        timestamp=datetime.fromisoformat(row['timestamp']),
+                        market_category=row['market_category'],
+                        accuracy_score=row['accuracy_score'],
+                        confidence_calibration=row['confidence_calibration'],
+                        response_time_ms=row['response_time_ms'],
+                        cost_usd=row['cost_usd'],
+                        decision_quality=row['decision_quality'],
+                        id=row['id']
+                    )
+                    for row in rows
+                ]
+
+        except Exception as e:
+            self.logger.error(f"Error getting model performances: {e}")
+            return []
+
+    async def get_ensemble_decisions(
+        self,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        market_id: Optional[str] = None,
+        limit: int = 1000
+    ) -> List[EnsembleDecision]:
+        """
+        Get ensemble decision records with optional filtering.
+
+        Args:
+            start_time: Start time filter
+            end_time: End time filter
+            market_id: Optional market ID filter
+            limit: Maximum number of records
+
+        Returns:
+            List of EnsembleDecision objects
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+
+                # Build query with optional filters
+                query = "SELECT * FROM ensemble_decisions WHERE 1=1"
+                params = []
+
+                if start_time:
+                    query += " AND timestamp >= ?"
+                    params.append(start_time.isoformat())
+
+                if end_time:
+                    query += " AND timestamp <= ?"
+                    params.append(end_time.isoformat())
+
+                if market_id:
+                    query += " AND market_id = ?"
+                    params.append(market_id)
+
+                query += " ORDER BY timestamp DESC LIMIT ?"
+                params.append(limit)
+
+                cursor = await db.execute(query, params)
+                rows = await cursor.fetchall()
+
+                return [
+                    EnsembleDecision(
+                        market_id=row['market_id'],
+                        models_consulted=json.loads(row['models_consulted']),
+                        final_decision=row['final_decision'],
+                        disagreement_level=row['disagreement_level'],
+                        selected_model=row['selected_model'],
+                        reasoning=row['reasoning'],
+                        timestamp=datetime.fromisoformat(row['timestamp']),
+                        id=row['id']
+                    )
+                    for row in rows
+                ]
+
+        except Exception as e:
+            self.logger.error(f"Error getting ensemble decisions: {e}")
+            return []

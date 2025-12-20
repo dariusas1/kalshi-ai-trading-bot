@@ -22,21 +22,18 @@ import sys
 import os
 from datetime import datetime, timedelta
 import json
+import time
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.utils.database import DatabaseManager
+from src.clients.kalshi_client import KalshiClient
+from src.config.settings import settings
 
 # Check if we're in demo mode (no API keys)
 DEMO_MODE = os.environ.get('DEMO_MODE', 'false').lower() == 'true'
 KALSHI_API_KEY = os.environ.get('KALSHI_API_KEY')
-
-# Only import KalshiClient if we have API keys
-if not DEMO_MODE and KALSHI_API_KEY:
-    from src.clients.kalshi_client import KalshiClient
-else:
-    KalshiClient = None
 
 # Configure Streamlit page
 st.set_page_config(
@@ -81,13 +78,33 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+def _extract_positions(positions_response):
+    """Normalize Kalshi positions response across possible API keys."""
+    if not isinstance(positions_response, dict):
+        return []
+    return positions_response.get("market_positions") or positions_response.get("positions") or []
+
+
+def _run_async(coro):
+    """Run async code safely from Streamlit's sync context."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        new_loop = asyncio.new_event_loop()
+        try:
+            return new_loop.run_until_complete(coro)
+        finally:
+            new_loop.close()
+    return asyncio.run(coro)
+
+
 # @st.cache_data(ttl=60)  # Cache for 1 minute - temporarily disabled
 def load_performance_data():
     """Load performance data from database."""
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
         db_manager = DatabaseManager()
         kalshi_client = KalshiClient() if KalshiClient else None
         
@@ -107,13 +124,8 @@ def load_performance_data():
                     }
             
             # Get LIVE positions from Kalshi API (not just database)
-            if kalshi_client:
-                positions_response = await kalshi_client.get_positions()
-                kalshi_positions = positions_response.get('market_positions', [])
-            else:
-                # Demo mode - no positions
-                kalshi_positions = []
-
+            positions_response = await kalshi_client.get_positions()
+            kalshi_positions = _extract_positions(positions_response)
             # Convert Kalshi positions to simple dictionaries for caching
             positions = []
             for pos in kalshi_positions:
@@ -151,10 +163,8 @@ def load_performance_data():
             await db_manager.close()
             
             return performance, positions
-        
-        performance, positions = loop.run_until_complete(get_data())
-        loop.close()
-        
+
+        performance, positions = _run_async(get_data())
         return performance, positions
         
     except Exception as e:
@@ -165,9 +175,6 @@ def load_performance_data():
 def load_llm_data():
     """Load LLM query data from database."""
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
         db_manager = DatabaseManager()
         
         async def get_data():
@@ -198,9 +205,7 @@ def load_llm_data():
             
             return queries, stats
         
-        queries, stats = loop.run_until_complete(get_data())
-        loop.close()
-        
+        queries, stats = _run_async(get_data())
         return queries, stats
         
     except Exception as e:
@@ -211,11 +216,7 @@ def load_llm_data():
 def load_system_health():
     """Load system health metrics including both available cash and total portfolio value."""
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-        kalshi_client = KalshiClient() if KalshiClient else None
-
+        kalshi_client = KalshiClient()
         async def get_health():
             if not kalshi_client:
                 # Demo mode - return default values
@@ -232,7 +233,7 @@ def load_system_health():
 
             # Get current positions to calculate total portfolio value
             positions_response = await kalshi_client.get_positions()
-            market_positions = positions_response.get('market_positions', [])
+            market_positions = _extract_positions(positions_response)
             
             total_position_value = 0
             positions_count = len(market_positions)
@@ -269,9 +270,7 @@ def load_system_health():
             
             return available_cash, total_portfolio_value, positions_count, total_position_value
         
-        available_cash, total_portfolio_value, positions_count, position_value = loop.run_until_complete(get_health())
-        loop.close()
-        
+        available_cash, total_portfolio_value, positions_count, position_value = _run_async(get_health())
         return {
             'available_cash': available_cash,
             'total_portfolio_value': total_portfolio_value, 
@@ -288,6 +287,121 @@ def load_system_health():
             'position_value': 0.0
         }
 
+@st.cache_data(ttl=60)  # Cache for 1 minute
+def load_period_pnl():
+    """Load P&L data for different time periods, checking cache first."""
+    try:
+        db_manager = DatabaseManager()
+        
+        async def get_pnl():
+            await db_manager.initialize()
+            
+            # Try cache first
+            cached = await db_manager.get_cached_analytics("period_pnl")
+            if cached:
+                await db_manager.close()
+                return cached
+            
+            # Compute fresh
+            today = await db_manager.get_pnl_by_period('today')
+            week = await db_manager.get_pnl_by_period('week')
+            month = await db_manager.get_pnl_by_period('month')
+            all_time = await db_manager.get_pnl_by_period('all')
+            
+            await db_manager.close()
+            return {'today': today, 'week': week, 'month': month, 'all': all_time}
+        
+        result = _run_async(get_pnl())
+        return result
+        
+    except Exception as e:
+        st.error(f"Error loading P&L data: {e}")
+        return {'today': {}, 'week': {}, 'month': {}, 'all': {}}
+
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def load_reconciliation_status():
+    """Load reconciliation status from analytics cache."""
+    try:
+        db_manager = DatabaseManager()
+
+        async def get_status():
+            await db_manager.initialize()
+            status = await db_manager.get_cached_analytics("reconciliation_status")
+            await db_manager.close()
+            return status or {}
+
+        return _run_async(get_status())
+    except Exception as e:
+        st.error(f"Error loading reconciliation status: {e}")
+        return {}
+
+def load_edge_analytics():
+    """Load edge analytics data (category, hourly, expiry, calibration), checking cache first."""
+    try:
+        db_manager = DatabaseManager()
+        
+        async def get_analytics():
+            await db_manager.initialize()
+            
+            # Try to load all components from cache individually or as a block
+            # In our processor we cache them individually but we can also check for a block
+            cached_cat = await db_manager.get_cached_analytics("category_performance")
+            cached_hour = await db_manager.get_cached_analytics("hourly_performance")
+            cached_exp = await db_manager.get_cached_analytics("expiry_performance")
+            cached_cal = await db_manager.get_cached_analytics("confidence_calibration")
+            cached_streaks = await db_manager.get_cached_analytics("trading_streaks")
+            
+            if all([cached_cat, cached_hour, cached_exp, cached_cal, cached_streaks]):
+                await db_manager.close()
+                return {
+                    'category': cached_cat,
+                    'hourly': cached_hour,
+                    'expiry': cached_exp,
+                    'calibration': cached_cal,
+                    'streaks': cached_streaks
+                }
+            
+            # Compute fresh if any missing
+            category = await db_manager.get_category_performance()
+            hourly = await db_manager.get_hourly_performance()
+            expiry = await db_manager.get_expiry_performance()
+            calibration = await db_manager.get_confidence_calibration()
+            streaks = await db_manager.get_trading_streaks()
+            
+            await db_manager.close()
+            return {
+                'category': category,
+                'hourly': hourly,
+                'expiry': expiry,
+                'calibration': calibration,
+                'streaks': streaks
+            }
+        
+        result = _run_async(get_analytics())
+        return result
+        
+    except Exception as e:
+        st.error(f"Error loading edge analytics: {e}")
+        return {'category': {}, 'hourly': {}, 'expiry': {}, 'calibration': [], 'streaks': {}}
+
+def load_recent_trades(limit=50):
+    """Load recent trade executions."""
+    try:
+        db_manager = DatabaseManager()
+        
+        async def get_trades():
+            await db_manager.initialize()
+            trades = await db_manager.get_recent_trades(limit=limit)
+            await db_manager.close()
+            return trades
+        
+        result = _run_async(get_trades())
+        return result
+        
+    except Exception as e:
+        st.error(f"Error loading trades: {e}")
+        return []
+
 def main():
     """Main dashboard function."""
 
@@ -300,11 +414,28 @@ def main():
     st.title("🚀 Trading System Dashboard")
     st.markdown("**Real-time monitoring and analysis of your automated trading system**")
     
-    # Add refresh button to clear cache
-    col1, col2 = st.columns([4, 1])
+    # Add refresh button and auto-refresh toggle
+    col1, col2, col3 = st.columns([3, 1, 1])
+    with col1:
+        st.caption("Auto-refresh uses polling (30s), not live streaming.")
     with col2:
-        if st.button("🔄 Refresh Data", help="Clear cache and reload all data"):
+        auto_refresh = st.checkbox("Auto-refresh", value=False, help="Refresh every 30 seconds")
+    with col3:
+        if st.button("🔄 Refresh", help="Clear cache and reload all data"):
             st.cache_data.clear()
+            st.rerun()
+    
+    # Auto-refresh logic - using non-blocking approach
+    if auto_refresh:
+        # Use Streamlit's built-in rerun mechanism for auto-refresh
+        # The user can manually refresh or we can use session state for timing
+        if 'last_refresh' not in st.session_state:
+            st.session_state.last_refresh = time.time()
+
+        # Auto-refresh every 30 seconds without blocking
+        current_time = time.time()
+        if current_time - st.session_state.last_refresh >= 30:
+            st.session_state.last_refresh = current_time
             st.rerun()
     
     # Sidebar for navigation
@@ -315,9 +446,12 @@ def main():
         [
             "📈 Overview",
             "🎯 Strategy Performance", 
+            "📊 Edge Analytics",
             "🤖 LLM Analysis",
             "💼 Positions & Trades",
             "⚠️ Risk Management",
+            "⚙️ Controls",
+            "📅 Historical",
             "🔧 System Health"
         ]
     )
@@ -327,6 +461,8 @@ def main():
         performance_data, positions = load_performance_data()
         llm_queries, llm_stats = load_llm_data()
         system_health_data = load_system_health()
+        period_pnl = load_period_pnl()
+        reconciliation_status = load_reconciliation_status()
     except Exception as e:
         st.error(f"Error loading dashboard data: {e}")
         st.info("Please check your system connections and try refreshing.")
@@ -339,24 +475,97 @@ def main():
     st.sidebar.metric("LLM Queries (24h)", len(llm_queries) if llm_queries else 0)
     st.sidebar.metric("Portfolio Balance", f"${system_health_data.get('total_portfolio_value', 0):.2f}")
     
+    # Show P&L by period in sidebar
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**💰 P&L Summary:**")
+    st.sidebar.metric("Today", f"${period_pnl.get('today', {}).get('total_pnl', 0):.2f}")
+    st.sidebar.metric("This Week", f"${period_pnl.get('week', {}).get('total_pnl', 0):.2f}")
+
+    # Data health banner
+    last_refresh = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    positions_count = system_health_data.get("positions_count", 0)
+    position_value = system_health_data.get("position_value", 0.0)
+    recon_ts = reconciliation_status.get("timestamp", "unknown")
+    if (not positions) and (positions_count > 0 or position_value > 0):
+        st.warning(
+            f"Data discrepancy detected. Dashboard shows 0 positions, "
+            f"but Kalshi reports {positions_count} positions. "
+            f"Last refresh: {last_refresh}. Last reconciliation: {recon_ts}."
+        )
+    else:
+        st.info(f"Data OK. Last refresh: {last_refresh}. Last reconciliation: {recon_ts}.")
+    
     # Page routing
     if page == "📈 Overview":
-        show_overview(performance_data, positions, system_health_data)
+        show_overview(performance_data, positions, system_health_data, period_pnl)
     elif page == "🎯 Strategy Performance":
         show_strategy_performance(performance_data)
+    elif page == "📊 Edge Analytics":
+        show_edge_analytics()
     elif page == "🤖 LLM Analysis":
         show_llm_analysis(llm_queries, llm_stats)
     elif page == "💼 Positions & Trades":
         show_positions_trades(positions)
     elif page == "⚠️ Risk Management":
         show_risk_management(performance_data, positions, system_health_data['total_portfolio_value'])
+    elif page == "⚙️ Controls":
+        show_controls()
+    elif page == "📅 Historical":
+        show_historical()
     elif page == "🔧 System Health":
         show_system_health(system_health_data['available_cash'], system_health_data['positions_count'], llm_stats)
 
-def show_overview(performance_data, positions, system_health_data):
+def show_overview(performance_data, positions, system_health_data, period_pnl=None):
     """Show overview dashboard."""
     
     st.header("📈 System Overview")
+    
+    # P&L by Period Cards
+    if period_pnl:
+        st.subheader("💰 P&L by Period")
+        p_col1, p_col2, p_col3, p_col4 = st.columns(4)
+        
+        with p_col1:
+            today_pnl = period_pnl.get('today', {}).get('total_pnl', 0)
+            today_trades = period_pnl.get('today', {}).get('total_trades', 0)
+            st.metric(
+                "📅 Today",
+                f"${today_pnl:.2f}",
+                delta=f"{today_trades} trades",
+                delta_color="off"
+            )
+        
+        with p_col2:
+            week_pnl = period_pnl.get('week', {}).get('total_pnl', 0)
+            week_wr = period_pnl.get('week', {}).get('win_rate', 0)
+            st.metric(
+                "📆 This Week",
+                f"${week_pnl:.2f}",
+                delta=f"{week_wr:.0f}% win rate",
+                delta_color="normal" if week_wr >= 50 else "inverse"
+            )
+        
+        with p_col3:
+            month_pnl = period_pnl.get('month', {}).get('total_pnl', 0)
+            month_trades = period_pnl.get('month', {}).get('total_trades', 0)
+            st.metric(
+                "📊 This Month",
+                f"${month_pnl:.2f}",
+                delta=f"{month_trades} trades",
+                delta_color="off"
+            )
+        
+        with p_col4:
+            all_pnl = period_pnl.get('all', {}).get('total_pnl', 0)
+            all_wr = period_pnl.get('all', {}).get('win_rate', 0)
+            st.metric(
+                "🏆 All Time",
+                f"${all_pnl:.2f}",
+                delta=f"{all_wr:.0f}% win rate",
+                delta_color="normal" if all_wr >= 50 else "inverse"
+            )
+        
+        st.divider()
     
     # Key metrics row
     col1, col2, col3, col4 = st.columns(4)
@@ -480,7 +689,7 @@ def show_overview(performance_data, positions, system_health_data):
                 color_continuous_scale='RdYlGn'
             )
             fig_pnl.update_layout(showlegend=False, height=400)
-            st.plotly_chart(fig_pnl, use_container_width=True)
+            st.plotly_chart(fig_pnl, width='stretch')
         
         with col2:
             # Win rate by strategy
@@ -493,7 +702,7 @@ def show_overview(performance_data, positions, system_health_data):
                 color_continuous_scale='Blues'
             )
             fig_winrate.update_layout(showlegend=False, height=400)
-            st.plotly_chart(fig_winrate, use_container_width=True)
+            st.plotly_chart(fig_winrate, width='stretch')
     else:
         st.info("📊 **No strategy data yet** - Run the trading system to start collecting performance data")
     
@@ -525,7 +734,7 @@ def show_overview(performance_data, positions, system_health_data):
         
         if position_data:
             df = pd.DataFrame(position_data)
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(df, width='stretch', hide_index=True)
     else:
         st.info("No active positions currently.")
 
@@ -565,7 +774,7 @@ def show_strategy_performance(performance_data):
             })
         
         df = pd.DataFrame(comparison_data)
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df, width='stretch', hide_index=True)
         
         # Performance charts
         col1, col2 = st.columns(2)
@@ -597,7 +806,7 @@ def show_strategy_performance(performance_data):
                 yaxis_title="Win Rate (%)",
                 height=500
             )
-            st.plotly_chart(fig_risk, use_container_width=True)
+            st.plotly_chart(fig_risk, width='stretch')
         
         with col2:
             # Capital deployment
@@ -607,7 +816,7 @@ def show_strategy_performance(performance_data):
                 title="Capital Deployment by Strategy"
             )
             fig_capital.update_layout(height=500)
-            st.plotly_chart(fig_capital, use_container_width=True)
+            st.plotly_chart(fig_capital, width='stretch')
     
     else:
         # Show individual strategy details
@@ -690,18 +899,55 @@ def show_llm_analysis(llm_queries, llm_stats):
         
         if has_estimated_tokens:
             st.caption("*Token counts marked with * are estimated from response text length due to missing usage data")
+            
+        # New AI Insights (Cost History & Confidence Distribution)
+        st.subheader("💡 AI Insights")
+        insight_col1, insight_col2 = st.columns(2)
         
-        # Usage by strategy
-        if len(llm_stats) > 1:
-            fig_usage = px.bar(
-                x=list(llm_stats.keys()),
-                y=[stats['query_count'] for stats in llm_stats.values()],
-                title="LLM Queries by Strategy",
-                labels={'x': 'Strategy', 'y': 'Query Count'},
-                color=[stats['total_cost'] for stats in llm_stats.values()],
-                color_continuous_scale='Blues'
-            )
-            st.plotly_chart(fig_usage, use_container_width=True)
+        with insight_col1:
+            # AI Cost History
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                db_manager = DatabaseManager()
+                async def get_cost():
+                    await db_manager.initialize()
+                    data = await db_manager.get_ai_cost_history(days=30)
+                    await db_manager.close()
+                    return data
+                cost_history = loop.run_until_complete(get_cost())
+                loop.close()
+                
+                if cost_history:
+                    df_cost = pd.DataFrame(cost_history)
+                    df_cost['date'] = pd.to_datetime(df_cost['date'])
+                    fig_cost = px.area(df_cost, x='date', y='cost', title="Daily AI Cost (Last 30 Days)",
+                                     labels={'cost': 'Cost ($)', 'date': 'Date'})
+                    st.plotly_chart(fig_cost, width='stretch')
+            except: pass
+            
+        with insight_col2:
+            # Confidence Distribution
+            confidences = [query.confidence for query in llm_queries if hasattr(query, 'confidence') and query.confidence]
+            if not confidences and llm_queries:
+                # Try to extract from rationale if not separate
+                confidences = []
+                import re
+                for q in llm_queries:
+                    match = re.search(r'confidence:?\s*(\d+(?:\.\d+)?)', str(q.response), re.IGNORECASE)
+                    if match:
+                        val = float(match.group(1))
+                        if val < 1: val *= 100
+                        confidences.append(val)
+            
+            if confidences:
+                fig_conf = px.histogram(x=confidences, nbins=20, title="Confidence Distribution",
+                                       labels={'x': 'Confidence (%)', 'y': 'Count'},
+                                       color_discrete_sequence=['indianred'])
+                st.plotly_chart(fig_conf, width='stretch')
+            else:
+                st.info("No confidence data available for distribution chart.")
+
     
     # Query filters
     st.subheader("🔍 Query Analysis")
@@ -848,7 +1094,7 @@ def show_positions_trades(positions):
     ]
     
     # Display filtered positions
-    st.dataframe(filtered_df, use_container_width=True, hide_index=True)
+    st.dataframe(filtered_df, width='stretch', hide_index=True)
     
     # Position analytics
     if not filtered_df.empty:
@@ -867,7 +1113,7 @@ def show_positions_trades(positions):
                 names=strategy_values.index,
                 title="Position Value by Strategy"
             )
-            st.plotly_chart(fig_strategy, use_container_width=True)
+            st.plotly_chart(fig_strategy, width='stretch')
         
         with col2:
             # Side distribution
@@ -879,7 +1125,7 @@ def show_positions_trades(positions):
                 title="Positions by Side",
                 labels={'x': 'Side', 'y': 'Count'}
             )
-            st.plotly_chart(fig_sides, use_container_width=True)
+            st.plotly_chart(fig_sides, width='stretch')
 
 def show_risk_management(performance_data, positions, system_balance):
     """Show risk management dashboard."""
@@ -972,6 +1218,59 @@ def show_risk_management(performance_data, positions, system_balance):
                 st.warning(alert)
         else:
             st.success("✅ All risk metrics within acceptable ranges")
+            
+        # Exposure by Category & Drawdown Tracker
+        risk_col1, risk_col2 = st.columns(2)
+        
+        with risk_col1:
+            st.subheader("🥧 Exposure by Category")
+            # We need to map market_ids to categories
+            # For simplicity, we'll try to extract category from the ticker prefix
+            cat_map = {}
+            for pos in positions:
+                ticker = pos.get('market_id', '')
+                # Common Kalshi prefixes
+                if ticker.startswith('KX'): cat_prefix = ticker[2:4]
+                else: cat_prefix = 'Other'
+                
+                cat_map[cat_prefix] = cat_map.get(cat_prefix, 0) + (pos['quantity'] * pos['entry_price'])
+            
+            if cat_map:
+                fig_exp = px.pie(names=list(cat_map.keys()), values=list(cat_map.values()), 
+                                title="Currency Exposure by Category")
+                st.plotly_chart(fig_exp, width='stretch')
+            else:
+                st.info("No categorical exposure data available.")
+                
+        with risk_col2:
+            st.subheader("📉 Drawdown Tracker")
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                db_manager = DatabaseManager()
+                async def get_drawdown():
+                    await db_manager.initialize()
+                    data = await db_manager.get_daily_pnl_history(days=365)
+                    await db_manager.close()
+                    return data
+                pnl_data = loop.run_until_complete(get_drawdown())
+                loop.close()
+                
+                if pnl_data:
+                    df_dd = pd.DataFrame(pnl_data).sort_values('date')
+                    df_dd['cumulative_pnl'] = df_dd['pnl'].cumsum()
+                    df_dd['peak'] = df_dd['cumulative_pnl'].cummax()
+                    df_dd['drawdown'] = df_dd['cumulative_pnl'] - df_dd['peak']
+                    
+                    max_dd = df_dd['drawdown'].min()
+                    curr_dd = df_dd['drawdown'].iloc[-1] if not df_dd.empty else 0
+                    
+                    st.metric("Current Drawdown", f"${curr_dd:.2f}")
+                    st.metric("Max Historical Drawdown", f"${max_dd:.2f}")
+                    
+                    fig_dd = px.line(df_dd, x='date', y='drawdown', title="Historical Drawdown ($)")
+                    st.plotly_chart(fig_dd, width='stretch')
+            except: pass
         
         # Risk by strategy breakdown
         strategy_names = [pos['strategy'] for pos in positions if 'strategy' in pos]
@@ -998,7 +1297,7 @@ def show_risk_management(performance_data, positions, system_balance):
                     }
                     for strategy, data in strategy_risk.items()
                 ])
-                st.dataframe(strategy_df, use_container_width=True, hide_index=True)
+                st.dataframe(strategy_df, width='stretch', hide_index=True)
         
     except Exception as e:
         st.error(f"Error calculating risk metrics: {e}")
@@ -1095,5 +1394,292 @@ def show_system_health(available_cash, positions_count, llm_stats):
     else:
         st.success("✅ System running optimally - no recommendations at this time")
 
+def show_edge_analytics():
+    """Show edge analytics (category, hourly, expiry, calibration)."""
+    st.header("📊 Edge Analytics")
+    st.markdown("**Identifying your strongest trading edges across different dimensions**")
+    
+    analytics = load_edge_analytics()
+    
+    # 1. Category Performance
+    st.subheader("📁 Performance by Market Category")
+    if analytics['category']:
+        cat_data = []
+        for cat, stats in analytics['category'].items():
+            cat_data.append({
+                'Category': cat.title(),
+                'Win Rate': f"{stats['win_rate']:.1f}%",
+                'Total P&L': stats['total_pnl'],
+                'Trades': stats['trades']
+            })
+        df_cat = pd.DataFrame(cat_data).sort_values('Total P&L', ascending=False)
+        
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            fig_cat = px.bar(
+                df_cat, x='Category', y='Total P&L',
+                color='Total P&L', color_continuous_scale='RdYlGn',
+                title="Total P&L by Category"
+            )
+            st.plotly_chart(fig_cat, width='stretch')
+        with col2:
+            st.dataframe(df_cat, hide_index=True, width='stretch')
+    else:
+        st.info("No category data available yet.")
+
+    # 2. Time-of-Day Analysis
+    st.subheader("🕒 Time-of-Day Analysis")
+    if analytics['hourly']:
+        hours = list(range(24))
+        hourly_pnl = [analytics['hourly'].get(h, {}).get('total_pnl', 0) for h in hours]
+        hourly_wr = [analytics['hourly'].get(h, {}).get('win_rate', 0) for h in hours]
+        
+        fig_hour = go.Figure()
+        fig_hour.add_trace(go.Bar(x=hours, y=hourly_pnl, name="P&L ($)", marker_color='royalblue'))
+        fig_hour.add_trace(go.Scatter(x=hours, y=hourly_wr, name="Win Rate (%)", yaxis="y2", line=dict(color='firebrick', width=3)))
+        
+        fig_hour.update_layout(
+            title="Hourly Performance (P&L vs Win Rate)",
+            xaxis=dict(title="Hour of Day (UTC)", tickmode='linear'),
+            yaxis=dict(title="Total P&L ($)"),
+            yaxis2=dict(title="Win Rate (%)", overlaying='y', side='right', range=[0, 100]),
+            legend=dict(x=0.01, y=0.99),
+            height=400
+        )
+        st.plotly_chart(fig_hour, width='stretch')
+    else:
+        st.info("No hourly data available yet.")
+
+    # 3. Expiry & Calibration
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("⌛ Win Rate by Time-to-Expiry")
+        if analytics['expiry']:
+            exp_data = [{'Bucket': k, 'Win Rate': v['win_rate'], 'Trades': v['trades']} for k, v in analytics['expiry'].items()]
+            df_exp = pd.DataFrame(exp_data)
+            fig_exp = px.bar(df_exp, x='Bucket', y='Win Rate', title="Win Rate % by Expiry Bucket", color='Win Rate', color_continuous_scale='Viridis')
+            fig_exp.update_yaxes(range=[0, 100])
+            st.plotly_chart(fig_exp, width='stretch')
+        else:
+            st.info("No expiry data available.")
+            
+    with col2:
+        st.subheader("🎯 Confidence Calibration")
+        if analytics['calibration']:
+            df_cal = pd.DataFrame(analytics['calibration'])
+            fig_cal = go.Figure()
+            # Perfect calibration line
+            fig_cal.add_trace(go.Scatter(x=[50, 100], y=[50, 100], mode='lines', name='Perfect Calibration', line=dict(dash='dash', color='gray')))
+            # Actual calibration
+            fig_cal.add_trace(go.Scatter(x=df_cal['avg_confidence'], y=df_cal['actual_win_rate'], mode='markers+lines', name='Actual', 
+                                     marker=dict(size=df_cal['trades']*2 + 10, color='orange', sizemode='area')))
+            
+            fig_cal.update_layout(
+                title="Predicted Confidence vs. Actual Win Rate",
+                xaxis_title="Predicted Confidence (%)",
+                yaxis_title="Actual Win Rate (%)",
+                xaxis=dict(range=[50, 100]),
+                yaxis=dict(range=[0, 100]),
+                height=400
+            )
+            st.plotly_chart(fig_cal, width='stretch')
+        else:
+            st.info("Not enough trade data for calibration analysis.")
+
+def show_controls():
+    """Show trading system controls (kill switch, thresholds, etc)."""
+    st.header("⚙️ System Controls")
+    st.markdown("**Live control panel for the trading bot's core parameters**")
+    
+    db_manager = DatabaseManager()
+    
+    async def get_and_set():
+        await db_manager.initialize()
+        
+        # 1. Kill Switch
+        st.subheader("🛑 Master Controls")
+        kill_switch = await db_manager.get_setting("kill_switch", "off")
+        
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            new_kill = st.toggle("KILL SWITCH", value=(kill_switch == "on"), help="Immediately pause all new trading activity")
+            if new_kill != (kill_switch == "on"):
+                await db_manager.set_setting("kill_switch", "on" if new_kill else "off")
+                st.success(f"Kill switch turned {'ON' if new_kill else 'OFF'}")
+        with col2:
+            if new_kill:
+                st.error("🚨 SYSTEM PAUSED: No new trades will be opened.")
+            else:
+                st.success("✅ SYSTEM ACTIVE: Bot is scanning for opportunities.")
+
+        st.divider()
+        
+        # 2. Thresholds
+        st.subheader("📈 Trading Thresholds")
+        default_min_conf = settings.trading.min_confidence_to_trade
+        default_max_risk = settings.trading.max_position_size_pct / 100
+        min_conf = float(await db_manager.get_setting("min_confidence", str(default_min_conf)))
+        max_risk = float(await db_manager.get_setting("max_risk_per_trade", str(default_max_risk)))
+        st.caption(f"Effective defaults: min_conf={default_min_conf:.2f}, max_risk={default_max_risk:.2%}")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            new_conf = st.slider("Minimum AI Confidence", 0.5, 0.95, min_conf, 0.05)
+            if new_conf != min_conf:
+                await db_manager.set_setting("min_confidence", str(new_conf))
+                st.toast(f"Confidence threshold updated to {new_conf}")
+        with col2:
+            new_risk = st.slider("Max Risk per Trade (% Portfolio)", 0.01, 0.20, max_risk, 0.01)
+            if new_risk != max_risk:
+                await db_manager.set_setting("max_risk_per_trade", str(new_risk))
+                st.toast(f"Max risk updated to {new_risk*100:.0f}%")
+
+        st.divider()
+        
+        # 3. Strategy Allocations
+        st.subheader("⚖️ Strategy Allocations")
+        
+        col_reb_1, col_reb_2 = st.columns([1, 2])
+        with col_reb_1:
+            auto_reb = await db_manager.get_setting("enable_auto_rebalance", "on")
+            new_auto = st.toggle("Auto-Rebalance", value=(auto_reb == "on"), help="Automatically adjust weights based on strategy performance")
+            if new_auto != (auto_reb == "on"):
+                await db_manager.set_setting("enable_auto_rebalance", "on" if new_auto else "off")
+                st.toast(f"Auto-rebalance turned {'ON' if new_auto else 'OFF'}")
+        with col_reb_2:
+            if new_auto:
+                st.info("Performance-based rebalancing is ACTIVE. Sliders below act as baselines.")
+            else:
+                st.info("Manual weights are ACTIVE. Bot will stick strictly to the values below.")
+
+        st.info("Adjust the target weight for each trading strategy.")
+        
+        mm_weight = int(await db_manager.get_setting("weight_market_making", "30"))
+        dir_weight = int(await db_manager.get_setting("weight_directional", "40"))
+        qf_weight = int(await db_manager.get_setting("weight_quick_flip", "30"))
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            new_mm = st.number_input("Market Making %", 0, 100, mm_weight, 5)
+        with col2:
+            new_dir = st.number_input("Directional %", 0, 100, dir_weight, 5)
+        with col3:
+            new_qf = st.number_input("Quick Flip %", 0, 100, qf_weight, 5)
+            
+        total_weight = new_mm + new_dir + new_qf
+        if total_weight != 100:
+            st.warning(f"Warning: Total allocation is {total_weight}%. It should equal 100%.")
+        
+        if st.button("Save Allocations"):
+            if total_weight != 100:
+                st.error("Allocation total must equal 100% before saving.")
+            else:
+                await db_manager.set_setting("weight_market_making", str(new_mm))
+                await db_manager.set_setting("weight_directional", str(new_dir))
+                await db_manager.set_setting("weight_quick_flip", str(new_qf))
+                st.success("Strategy allocations saved.")
+
+        st.divider()
+        
+        # 4. Blacklist
+        st.subheader("🚫 Market Category Blacklist")
+        blacklist_raw = await db_manager.get_setting("category_blacklist", "")
+        current_blacklist = [c.strip() for c in blacklist_raw.split(",")] if blacklist_raw else []
+        
+        all_categories = ["Politics", "Sports", "Economics", "Weather", "Crypto", "Entertainment", "Finance"]
+        new_blacklist = st.multiselect("Exclude these categories from trading", all_categories, default=[c.title() for c in current_blacklist])
+        
+        if st.button("Update Blacklist"):
+            await db_manager.set_setting("category_blacklist", ",".join([c.lower() for c in new_blacklist]))
+            st.success("Category blacklist updated.")
+            
+        await db_manager.close()
+
+    try:
+        _run_async(get_and_set())
+    except Exception as e:
+        st.error(f"Error handling controls: {e}")
+
+def show_historical():
+    """Show historical analysis (daily P&L, journal, streaks)."""
+    st.header("📅 Historical Analysis")
+    st.markdown("**Deep dive into past performance and trade history**")
+    
+    # 1. Streaks & Summary
+    analytics = load_edge_analytics()
+    streaks = analytics.get('streaks', {})
+    
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        streak_val = streaks.get('current_streak', 0)
+        s_type = streaks.get('streak_type', '').upper()
+        color = "green" if s_type == 'WIN' else "red"
+        st.markdown(f"**Current Streak:** <span style='color:{color}; font-size: 24px;'>{streak_val} {s_type}</span>", unsafe_allow_html=True)
+    with col2:
+        st.metric("Max Win Streak", streaks.get('max_win_streak', 0))
+    with col3:
+        st.metric("Max Loss Streak", streaks.get('max_loss_streak', 0))
+    with col4:
+        # Placeholder for other metrics
+        st.metric("Realized P&L (Total)", f"${sum(trade.get('pnl', 0) for trade in load_recent_trades(limit=1000)):.2f}")
+        
+    st.divider()
+
+    # 2. Daily P&L Heatmap
+    st.subheader("🗓️ Daily P&L History")
+    pnl_history = []
+    try:
+        db_manager = DatabaseManager()
+        async def get_hist():
+            await db_manager.initialize()
+            data = await db_manager.get_daily_pnl_history(days=60)
+            await db_manager.close()
+            return data
+        pnl_history = _run_async(get_hist())
+    except:
+        pass
+    
+    if pnl_history:
+        df_hist = pd.DataFrame(pnl_history)
+        df_hist['date'] = pd.to_datetime(df_hist['date'])
+        
+        fig_hist = px.bar(
+            df_hist, x='date', y='pnl',
+            color='pnl', color_continuous_scale='RdYlGn',
+            title="Daily Realized P&L (Last 60 Days)",
+            labels={'pnl': 'P&L ($)', 'date': 'Date'}
+        )
+        st.plotly_chart(fig_hist, width='stretch')
+    else:
+        st.info("No historical P&L data found.")
+
+    # 3. Trade Journal
+    st.subheader("📓 Trade Journal")
+    trades = load_recent_trades(limit=100)
+    
+    if trades:
+        df_trades = pd.DataFrame(trades)
+        # Formatter for better display
+        df_display = df_trades.copy()
+        df_display['pnl'] = df_display['pnl'].map(lambda x: f"${x:.2f}")
+        df_display['entry_price'] = df_display['entry_price'].map(lambda x: f"${x:.3f}")
+        df_display['exit_price'] = df_display['exit_price'].map(lambda x: f"${x:.3f}")
+        
+        st.dataframe(df_display, width='stretch', hide_index=True)
+        
+        # Export button
+        csv = df_trades.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            "📥 Export to CSV",
+            csv,
+            "trading_journal.csv",
+            "text/csv",
+            key='download-csv'
+        )
+    else:
+        st.info("No trades logged in the journal yet.")
+
 if __name__ == "__main__":
-    main() 
+    main()
+ 

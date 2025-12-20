@@ -1,0 +1,37 @@
+task_groups:
+  - name: Database Layer
+    claude_code_subagent: backend-dev
+    standards:
+      - all
+  - name: Multi-Model Performance Tracking System
+    claude_code_subagent: ml-developer
+    standards:
+      - global/*
+  - name: Intelligent Model Selection Engine
+    claude_code_subagent: ml-developer
+    standards:
+      - global/*
+  - name: Advanced Ensemble Implementation
+    claude_code_subagent: ml-developer
+    standards:
+      - global/*
+  - name: Cost Optimization Framework
+    claude_code_subagent: backend-dev
+    standards:
+      - global/*
+  - name: Enhanced Fallback and Redundancy
+    claude_code_subagent: backend-dev
+    standards:
+      - global/*
+  - name: System Integration and Configuration
+    claude_code_subagent: system-architect
+    standards:
+      - all
+  - name: Monitoring and Analytics Dashboard
+    claude_code_subagent: frontend-architect
+    standards:
+      - all
+  - name: Test Review & Gap Analysis
+    claude_code_subagent: quality-engineer
+    standards:
+      - global/*

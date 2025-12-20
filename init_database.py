@@ -22,7 +22,7 @@ async def init_database():
         # Initialize database manager
         db_manager = DatabaseManager()
         
-        # Initialize database and create tables
+        # Initialize database schema and run migrations
         await db_manager.initialize()
         
         print("✅ Database initialized successfully!")

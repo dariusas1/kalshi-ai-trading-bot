@@ -1,0 +1,11 @@
+# Kalshi AI Trading Bot - Railway Deployment
+
+[build]
+builder = "dockerfile"
+
+[deploy]
+startCommand = "./start_railway.sh"
+healthcheckPath = "/"
+healthcheckTimeout = 120
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 10

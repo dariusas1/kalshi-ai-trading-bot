@@ -39,6 +39,7 @@ pytz==2023.3
 
 # Rate limiting
 ratelimit==2.2.1
+schedule==1.2.1
 
 # Configuration management
 pyyaml==6.0.1
@@ -58,7 +59,6 @@ black==23.12.1
 isort==5.13.2
 uvicorn
 json-repair
-
 # Streamlit dashboard
-streamlit>=1.28.0
-plotly>=5.17.0 
+streamlit>=1.32.0
+plotly>=5.17.0

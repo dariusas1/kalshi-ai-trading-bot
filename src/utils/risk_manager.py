@@ -19,6 +19,7 @@ import uuid
 from src.utils.database import DatabaseManager, Position
 from src.clients.kalshi_client import KalshiClient
 from src.utils.logging_setup import get_trading_logger
+from src.config.settings import settings
 
 
 @dataclass
@@ -63,9 +64,9 @@ class RiskManager:
         self.logger = get_trading_logger("risk_manager")
         
         # Default configuration if not provided
-        self.max_reduction_per_cycle = 0.30  # Max 30% reduction per position per cycle
-        self.min_position_value = 5.0  # Don't reduce below $5
-        self.rebalance_threshold = 0.10  # 10% drift triggers rebalancing
+        self.max_reduction_per_cycle = settings.trading.max_reduction_per_cycle
+        self.min_position_value = settings.trading.min_position_value
+        self.rebalance_threshold = settings.trading.rebalance_threshold
         
     async def reduce_position_sizing(
         self, 
