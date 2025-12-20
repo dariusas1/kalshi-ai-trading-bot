@@ -19,9 +19,10 @@ from src.intelligence.cost_optimizer import (
     CostOptimizationConfig,
     DynamicCostModel
 )
+from src.utils.performance_tracker import PerformanceTracker
 
 
-class TestCostOptimizerMinimal(unittest.TestCase):
+class TestCostOptimizerMinimal(unittest.IsolatedAsyncioTestCase):
     """Minimal test for CostOptimizer basic functionality."""
 
     def setUp(self):
@@ -113,7 +114,8 @@ class TestCostOptimizerMinimal(unittest.TestCase):
         # Create mock optimizer to test helper methods
         db_manager = MagicMock()
         config = CostOptimizationConfig()
-        optimizer = CostOptimizer(db_manager, config)
+        performance_tracker = MagicMock()
+        optimizer = CostOptimizer(db_manager, performance_tracker, config)
 
         assert optimizer._get_volume_range(500) == "low"
         assert optimizer._get_volume_range(2500) == "medium"
@@ -123,7 +125,8 @@ class TestCostOptimizerMinimal(unittest.TestCase):
         """Test price range classification logic."""
         db_manager = MagicMock()
         config = CostOptimizationConfig()
-        optimizer = CostOptimizer(db_manager, config)
+        performance_tracker = MagicMock()
+        optimizer = CostOptimizer(db_manager, performance_tracker, config)
 
         assert optimizer._get_price_range(0.2) == "low"
         assert optimizer._get_price_range(0.5) == "medium"
@@ -133,7 +136,8 @@ class TestCostOptimizerMinimal(unittest.TestCase):
         """Test cache key generation for consistent caching."""
         db_manager = MagicMock()
         config = CostOptimizationConfig()
-        optimizer = CostOptimizer(db_manager, config)
+        performance_tracker = MagicMock()
+        optimizer = CostOptimizer(db_manager, performance_tracker, config)
 
         market_data1 = {
             "category": "technology",
@@ -161,7 +165,8 @@ class TestCostOptimizerMinimal(unittest.TestCase):
         """Test cache entry validity checking."""
         db_manager = MagicMock()
         config = CostOptimizationConfig()
-        optimizer = CostOptimizer(db_manager, config)
+        performance_tracker = MagicMock()
+        optimizer = CostOptimizer(db_manager, performance_tracker, config)
 
         # Valid entry
         valid_entry = CacheEntry(
@@ -194,7 +199,8 @@ class TestCostOptimizerMinimal(unittest.TestCase):
         """Test efficiency score calculation logic."""
         db_manager = MagicMock()
         config = CostOptimizationConfig()
-        optimizer = CostOptimizer(db_manager, config)
+        performance_tracker = MagicMock()
+        optimizer = CostOptimizer(db_manager, performance_tracker, config)
 
         # Mock cost metrics
         cost_metrics = MagicMock()
@@ -216,7 +222,8 @@ class TestCostOptimizerMinimal(unittest.TestCase):
         """Test model cost estimation."""
         db_manager = MagicMock()
         config = CostOptimizationConfig()
-        optimizer = CostOptimizer(db_manager, config)
+        performance_tracker = MagicMock()
+        optimizer = CostOptimizer(db_manager, performance_tracker, config)
 
         # Test different trade values
         low_cost = await optimizer._estimate_model_cost("grok-4", 5.0)

@@ -417,7 +417,7 @@ class TestEnsembleComponentCoordination:
         # Create components
         performance_tracker = PerformanceTracker(mock_db_manager)
         model_selector = ModelSelector(performance_tracker)
-        cost_optimizer = CostOptimizer(mock_db_manager)
+        cost_optimizer = CostOptimizer(mock_db_manager, performance_tracker)
         config = EnsembleConfig()
 
         # Create ensemble engine
@@ -448,7 +448,7 @@ class TestEnsembleComponentCoordination:
         # Create components
         performance_tracker = PerformanceTracker(mock_db_manager)
         model_selector = ModelSelector(performance_tracker)
-        cost_optimizer = CostOptimizer(mock_db_manager)
+        cost_optimizer = CostOptimizer(mock_db_manager, performance_tracker)
 
         # Test that components can share data
         # Mock some performance data

@@ -40,7 +40,7 @@ class TestEndToEndEnsembleWorkflows:
         # Initialize ensemble components
         performance_tracker = PerformanceTracker(db_manager)
         model_selector = ModelSelector(performance_tracker)
-        cost_optimizer = CostOptimizer(db_manager)
+        cost_optimizer = CostOptimizer(db_manager, performance_tracker)
         fallback_manager = FallbackManager(db_manager)
         ensemble_engine = EnsembleEngine(db_manager, model_selector, cost_optimizer)
 
@@ -360,7 +360,7 @@ class TestBudgetConstrainedEnsembleDecisions:
         await db_manager.initialize()
 
         performance_tracker = PerformanceTracker(db_manager)
-        cost_optimizer = CostOptimizer(db_manager)
+        cost_optimizer = CostOptimizer(db_manager, performance_tracker)
         ensemble_engine = EnsembleEngine(db_manager, cost_optimizer=cost_optimizer)
 
         return {'db': db_manager, 'engine': ensemble_engine, 'optimizer': cost_optimizer}
@@ -600,7 +600,7 @@ class TestMultiModelCoordinationIntegration:
         # Initialize all components
         performance_tracker = PerformanceTracker(db_manager)
         model_selector = ModelSelector(performance_tracker)
-        cost_optimizer = CostOptimizer(db_manager)
+        cost_optimizer = CostOptimizer(db_manager, performance_tracker)
         fallback_manager = FallbackManager(db_manager)
         ensemble_engine = EnsembleEngine(
             db_manager,

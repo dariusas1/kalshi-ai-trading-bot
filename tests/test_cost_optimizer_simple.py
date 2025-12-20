@@ -17,7 +17,7 @@ from src.intelligence.cost_optimizer import (
     CostOptimizationConfig,
     DynamicCostModel
 )
-from src.utils.performance_tracker import ModelPerformanceMetrics, CostPerformanceMetrics
+from src.utils.performance_tracker import PerformanceTracker, ModelPerformanceMetrics, CostPerformanceMetrics
 from src.utils.database import DatabaseManager
 
 
@@ -36,6 +36,7 @@ class TestCostOptimizer(unittest.TestCase):
     def _get_cost_optimizer(self):
         """Create cost optimizer instance for testing."""
         db_manager = AsyncMock(spec=DatabaseManager)
+        performance_tracker = MagicMock()
         config = CostOptimizationConfig(
             enable_dynamic_modeling=True,
             daily_budget_limit=50.0,
@@ -43,7 +44,7 @@ class TestCostOptimizer(unittest.TestCase):
             enable_intelligent_caching=True,
             enable_real_time_monitoring=True
         )
-        return CostOptimizer(db_manager, config)
+        return CostOptimizer(db_manager, performance_tracker, config)
 
     def test_initialization(self):
         """Test CostOptimizer initialization."""

@@ -571,7 +571,7 @@ class EnsembleEngine(TradingLoggerMixin):
             disagreement_detected=False,
             disagreement_level=0.0,
             uncertainty_score=1.0 - best_prediction.decision.confidence,
-            confidence_level=self._determine_confidence_level(best_prediction.decision.confidence),
+            confidence_level=self._determine_confidence_level(1.0 - best_prediction.decision.confidence),
             reasoning=f"Selected {best_prediction.model_name} with highest calibrated confidence",
             processing_time_ms=0.0
         )
@@ -744,9 +744,14 @@ class EnsembleEngine(TradingLoggerMixin):
             uncertainty_result.get("uncertainty_score", 0) > self.config.uncertainty_threshold):
             return None
 
+        # Determine side based on market context and action
+        # For now, use YES for BUY actions and NO for SKIP/SELL actions
+        # TODO: Implement more sophisticated side determination based on market data
+        determined_side = "YES" if best_action[0] == "BUY" else "NO"
+
         return TradingDecision(
             action=best_action[0],
-            side="YES",  # Would be determined by context
+            side=determined_side,
             confidence=best_action[1],
             reasoning=f"Weighted ensemble decision: {best_action[0]} ({best_action[1]:.2f} vote share)"
         )

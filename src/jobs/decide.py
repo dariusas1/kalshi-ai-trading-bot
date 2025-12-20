@@ -361,11 +361,7 @@ async def make_decision_for_market(
             f"at {decision.limit_price}c with confidence {confidence} (adjusted: {adjusted_confidence:.2f}, cost: ${total_analysis_cost:.3f})"
         )
 
-        # Record the analysis with ensemble metadata
-        analysis_metadata = {
-            "ensemble_uncertainty": ensemble_uncertainty,
-            "adjusted_confidence": adjusted_confidence
-        }
+        # Record the analysis
         await db_manager.record_market_analysis(
             market.market_id, decision_action, adjusted_confidence, total_analysis_cost
         )

@@ -22,7 +22,7 @@ from src.intelligence.cost_optimizer import (
     CostOptimizationConfig,
     DynamicCostModel
 )
-from src.utils.performance_tracker import ModelPerformanceMetrics, CostPerformanceMetrics
+from src.utils.performance_tracker import PerformanceTracker, ModelPerformanceMetrics, CostPerformanceMetrics
 from src.utils.database import DatabaseManager
 
 
@@ -46,7 +46,8 @@ class TestDynamicCostPerformanceModeling(unittest.TestCase):
             cost_performance_window_hours=24,
             min_predictions_for_modeling=5
         )
-        optimizer = CostOptimizer(db_manager, config)
+        performance_tracker = MagicMock()
+        optimizer = CostOptimizer(db_manager, performance_tracker, config)
         return optimizer
 
     def test_calculate_dynamic_cost_efficiency_ratio(self):
@@ -166,7 +167,8 @@ class TestBudgetAwareSelection:
             enable_budget_controls=True,
             budget_alert_threshold=0.8
         )
-        optimizer = CostOptimizer(db_manager, config)
+        performance_tracker = MagicMock()
+        optimizer = CostOptimizer(db_manager, performance_tracker, config)
         return optimizer
 
     @pytest.mark.asyncio
@@ -251,7 +253,8 @@ class TestIntelligentCaching:
             cache_ttl_minutes=30,
             max_cache_size=1000
         )
-        optimizer = CostOptimizer(db_manager, config)
+        performance_tracker = MagicMock()
+        optimizer = CostOptimizer(db_manager, performance_tracker, config)
         return optimizer
 
     @pytest.mark.asyncio
@@ -349,7 +352,8 @@ class TestRealTimeCostMonitoring:
             monitoring_interval_seconds=60,
             auto_spending_controls=True
         )
-        optimizer = CostOptimizer(db_manager, config)
+        performance_tracker = MagicMock()
+        optimizer = CostOptimizer(db_manager, performance_tracker, config)
         return optimizer
 
     @pytest.mark.asyncio
@@ -466,7 +470,8 @@ class TestIntegratedCostOptimization:
             enable_real_time_monitoring=True,
             daily_budget_limit=25.0
         )
-        optimizer = CostOptimizer(db_manager, config)
+        performance_tracker = MagicMock()
+        optimizer = CostOptimizer(db_manager, performance_tracker, config)
         return optimizer
 
     @pytest.mark.asyncio
