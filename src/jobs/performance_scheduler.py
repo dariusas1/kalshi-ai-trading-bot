@@ -16,6 +16,10 @@ import threading
 from dataclasses import dataclass
 
 from src.jobs.automated_performance_analyzer import run_performance_analysis
+from src.jobs.performance_analyzer import TradingPerformanceAnalyzer
+from src.clients.kalshi_client import KalshiClient
+from src.clients.xai_client import XAIClient
+from src.utils.database import DatabaseManager
 from src.utils.logging_setup import get_trading_logger
 
 
@@ -160,9 +164,10 @@ class PerformanceScheduler:
         try:
             report = await run_performance_analysis()
             self.last_analysis = report
-            
+
+            legacy_report = await self._run_legacy_performance_analysis()
             # Generate comprehensive weekly report
-            weekly_report = await self._generate_weekly_report(report)
+            weekly_report = await self._generate_weekly_report(report, legacy_report)
             
             self.logger.info(
                 "📊 Weekly analysis completed",
@@ -309,13 +314,33 @@ Manual monitoring may be required until the issue is resolved.
             error=str(error)
         )
     
-    async def _generate_weekly_report(self, report: Dict[str, Any]) -> Dict[str, Any]:
+    async def _run_legacy_performance_analysis(self) -> Dict[str, Any]:
+        """Run legacy performance analyzer for a supplemental weekly report."""
+        try:
+            db_manager = DatabaseManager()
+            kalshi_client = KalshiClient()
+            xai_client = XAIClient(kalshi_client=kalshi_client)
+            analyzer = TradingPerformanceAnalyzer(db_manager, kalshi_client, xai_client)
+            report = await analyzer.run_comprehensive_analysis()
+            await xai_client.close()
+            await kalshi_client.close()
+            return report
+        except Exception as e:
+            self.logger.error(f"Legacy performance analysis failed: {e}")
+            return {}
+
+    async def _generate_weekly_report(
+        self,
+        report: Dict[str, Any],
+        legacy_report: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """Generate comprehensive weekly report."""
         weekly_report = {
             'timestamp': datetime.now().isoformat(),
             'type': 'weekly_summary',
             'period': 'last_7_days',
             'current_analysis': report,
+            'legacy_analysis': legacy_report or {},
             'summary': {
                 'health_score': report['summary']['overall_health_score'],
                 'health_trend': 'stable',  # Could be calculated from historical data

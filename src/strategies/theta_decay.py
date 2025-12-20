@@ -183,6 +183,13 @@ class ThetaDecayStrategy:
             if hours_to_expiry > self.max_hours_to_expiry or hours_to_expiry < self.min_hours_to_expiry:
                 return None
             
+            # 🚨 SAFEGUARD: Do not trade "dead" markets that are practically resolved
+            # If YES price is > 98c or < 2c, theta decay is already mostly realized
+            # and we risk buying into a market that is already effectively over.
+            if yes_price > 0.98 or yes_price < 0.02:
+                self.logger.info(f"⏭️ Skipping {market.market_id} - market is already priced effectively at resolution ({yes_price:.2f})")
+                return None
+            
             # Check for theta opportunity
             # Case 1: YES is overpriced (high YES price)
             if yes_price >= self.min_yes_price and yes_price <= self.max_yes_price:
@@ -383,15 +390,33 @@ class ThetaDecayStrategy:
                 position_id = await self.db_manager.add_position(position)
                 if position_id:
                     position.id = position_id
-                    results['trades_executed'] += 1
-                    results['total_exposure'] += quantity * entry_price
-                    results['positions_created'].append(position)
-                    remaining_budget -= quantity * entry_price
-                    
-                    self.logger.info(
-                        f"✅ Created theta position: {opp.market_id} {side} x{quantity} "
-                        f"@ {entry_price:.2f}, edge={opp.theta_edge:.1%}"
+                    from src.jobs.execute import execute_position
+                    from src.config.settings import settings
+
+                    live_mode = getattr(settings.trading, 'live_trading_enabled', False)
+                    success = await execute_position(
+                        position=position,
+                        live_mode=live_mode,
+                        db_manager=self.db_manager,
+                        kalshi_client=self.kalshi_client,
+                        edge=opp.theta_edge
                     )
+
+                    if success:
+                        results['trades_executed'] += 1
+                        results['total_exposure'] += quantity * entry_price
+                        results['positions_created'].append(position)
+                        remaining_budget -= quantity * entry_price
+
+                        self.logger.info(
+                            f"✅ Executed theta position: {opp.market_id} {side} x{quantity} "
+                            f"@ {entry_price:.2f}, edge={opp.theta_edge:.1%}"
+                        )
+                    else:
+                        await self.db_manager.update_position_status(position.id, "closed")
+                        self.logger.error(
+                            f"❌ Failed to execute theta position: {opp.market_id} {side}"
+                        )
                 
             except Exception as e:
                 self.logger.error(f"Error executing theta trade for {opp.market_id}: {e}")
@@ -424,7 +449,14 @@ async def run_theta_decay_strategy(
     logger = get_trading_logger("theta_decay_main")
     
     try:
-        strategy = ThetaDecayStrategy(kalshi_client, db_manager)
+        from src.config.settings import settings
+        strategy = ThetaDecayStrategy(
+            kalshi_client,
+            db_manager,
+            min_yes_price=settings.trading.theta_min_yes_price,
+            max_hours_to_expiry=settings.trading.theta_max_expiry_hours,
+            theta_allocation=settings.trading.theta_allocation
+        )
         
         # Find opportunities
         opportunities = await strategy.find_theta_opportunities()

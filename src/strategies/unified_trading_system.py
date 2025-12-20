@@ -120,9 +120,10 @@ class UnifiedAdvancedTradingSystem:
     optimally using ALL available capital with sophisticated risk management.
     
     Strategy allocation:
-    1. Market Making (40%): Profit from spreads without directional risk
-    2. Directional Trading (50%): Take positions based on AI edge
-    3. Arbitrage (10%): Cross-market and temporal arbitrage
+    1. Market Making (30%): Profit from spreads without directional risk
+    2. Directional Trading (40%): Take positions based on AI edge
+    3. Quick Flip (30%): Scalping low-priced contracts
+    4. Arbitrage (0% by default): Cross-market and temporal arbitrage
     
     Features:
     - No time restrictions (trade any deadline)
@@ -206,25 +207,39 @@ class UnifiedAdvancedTradingSystem:
         
         # 🎯 DYNAMIC ALLOCATION: Use performance-based allocation instead of static split
         try:
-            from src.utils.dynamic_allocation import get_dynamic_strategy_allocation
+            from src.utils.dynamic_allocation import get_dynamic_strategy_allocation, StrategyAllocation
             
-            dynamic_allocation = await get_dynamic_strategy_allocation(self.db_manager)
+            # Create baseline from current config (which might be from dashboard settings)
+            baseline = StrategyAllocation(
+                market_making=self.config.market_making_allocation,
+                directional_trading=self.config.directional_trading_allocation,
+                quick_flip=self.config.quick_flip_allocation,
+                arbitrage=self.config.arbitrage_allocation
+            )
             
-            # Only use dynamic allocation if it's valid
-            if dynamic_allocation.validate():
-                self.config.market_making_allocation = dynamic_allocation.market_making
-                self.config.directional_trading_allocation = dynamic_allocation.directional_trading
-                self.config.quick_flip_allocation = dynamic_allocation.quick_flip
-                self.config.arbitrage_allocation = dynamic_allocation.arbitrage
+            # Check if auto-rebalancing is enabled
+            auto_rebalance = await self.db_manager.get_setting("enable_auto_rebalance", "on")
+            
+            if auto_rebalance == "on":
+                dynamic_allocation = await get_dynamic_strategy_allocation(self.db_manager, baseline=baseline)
                 
-                self.logger.info(
-                    f"📊 DYNAMIC ALLOCATION ACTIVE: "
-                    f"MM={dynamic_allocation.market_making:.1%}, "
-                    f"Dir={dynamic_allocation.directional_trading:.1%}, "
-                    f"QF={dynamic_allocation.quick_flip:.1%}"
-                )
+                # Only use dynamic allocation if it's valid
+                if dynamic_allocation.validate():
+                    self.config.market_making_allocation = dynamic_allocation.market_making
+                    self.config.directional_trading_allocation = dynamic_allocation.directional_trading
+                    self.config.quick_flip_allocation = dynamic_allocation.quick_flip
+                    self.config.arbitrage_allocation = dynamic_allocation.arbitrage
+                    
+                    self.logger.info(
+                        f"📊 DYNAMIC ALLOCATION ACTIVE: "
+                        f"MM={dynamic_allocation.market_making:.1%}, "
+                        f"Dir={dynamic_allocation.directional_trading:.1%}, "
+                        f"QF={dynamic_allocation.quick_flip:.1%}"
+                    )
+                else:
+                    self.logger.warning("Dynamic allocation invalid - using baseline")
             else:
-                self.logger.warning("Dynamic allocation invalid - using static baseline")
+                self.logger.info("📊 Auto-rebalance is OFF - using manual dashboard settings")
                 
         except Exception as e:
             self.logger.warning(f"Could not get dynamic allocation, using static: {e}")
@@ -254,6 +269,8 @@ class UnifiedAdvancedTradingSystem:
         6. Monitor and rebalance as needed
         """
         self.logger.info("🚀 Executing Unified Advanced Trading Strategy")
+        if settings.trading.options_strategies:
+            self.logger.warning("Options strategies enabled in settings but not implemented; skipping")
         
         try:
             # Step 0: Check and enforce position limits AND cash reserves
@@ -290,7 +307,7 @@ class UnifiedAdvancedTradingSystem:
             
             # Step 1: Get ALL available markets (no time restrictions) - MORE PERMISSIVE VOLUME
             markets = await self.db_manager.get_eligible_markets(
-            volume_min=200,  # DECREASED: Much lower volume requirement (was 50,000, now 200) for more opportunities
+            volume_min=settings.trading.min_volume_for_analysis,
             max_days_to_expiry=365  # Accept any timeline with dynamic exits
         )
             if not markets:
@@ -307,7 +324,10 @@ class UnifiedAdvancedTradingSystem:
             )
             
             # Step 3: Execute arbitrage opportunities
-            arbitrage_results = await self._execute_arbitrage_strategy(markets)
+            if self.config.arbitrage_allocation > 0:
+                arbitrage_results = await self._execute_arbitrage_strategy(markets)
+            else:
+                arbitrage_results = {'arbitrage_trades': 0, 'arbitrage_profit': 0.0, 'arbitrage_exposure': 0.0}
             
             # Step 4.5: Execute Theta Decay Strategy
             theta_results = {}
@@ -351,15 +371,23 @@ class UnifiedAdvancedTradingSystem:
         """
         try:
             # Check if market making is enabled in settings
-            from src.config import settings as settings_module
-            if not getattr(settings_module, 'enable_market_making', True):
+            if not getattr(settings.trading, 'enable_market_making', True):
                 self.logger.info("⏭️ Market making DISABLED in settings - skipping")
                 return {'orders_placed': 0, 'expected_profit': 0.0, 'total_exposure': 0.0}
             
             self.logger.info(f"🎯 Executing Market Making Strategy on {len(markets)} markets")
             
+            volume_min = getattr(settings.trading, "min_volume_for_market_making", 0)
+            filtered_markets = [m for m in markets if m.volume >= volume_min]
+            if len(filtered_markets) != len(markets):
+                self.logger.info(
+                    f"Filtered {len(markets) - len(filtered_markets)} markets below volume {volume_min}"
+                )
+
             # Analyze market making opportunities
-            opportunities = await self.market_maker.analyze_market_making_opportunities(markets)
+            opportunities = await self.market_maker.analyze_market_making_opportunities(
+                filtered_markets, available_capital=self.market_making_capital
+            )
             
             if not opportunities:
                 self.logger.warning("No market making opportunities found")
@@ -444,7 +472,7 @@ class UnifiedAdvancedTradingSystem:
             # Configure quick flip strategy for our capital allocation
             quick_flip_config = QuickFlipConfig(
                 min_entry_price=1,      # Start with 1¢ opportunities
-                max_entry_price=15,     # Up to 15¢ entries
+                max_entry_price=20,     # Up to 20¢ entries
                 min_profit_margin=1.0,  # 100% minimum return (1¢ → 2¢)
                 max_position_size=100,  # Max 100 contracts per position
                 max_concurrent_positions=min(25, int(self.quick_flip_capital / 20)),  # Scale with capital
@@ -597,6 +625,10 @@ class UnifiedAdvancedTradingSystem:
                         price = market_info.get('no_price', 50) / 100
                     
                     # Calculate quantity
+                    if price <= 0:
+                        self.logger.warning(f"Skipping {market_id} due to invalid price: {price}")
+                        results['failed_executions'] += 1
+                        continue
                     quantity = max(1, int(position_value / price))
                     
                     # Calculate proper stop-loss levels using Grok4 recommendations
@@ -778,12 +810,21 @@ class UnifiedAdvancedTradingSystem:
             qf_weight = quick_flip_results.get('total_capital_used', 0) / (total_capital_used + 1e-8)
             arb_weight = arbitrage_results.get('arbitrage_exposure', 0) / (total_capital_used + 1e-8)
             
-            # Portfolio expected return (weighted average)
+            # Normalize expected returns to rate-of-return terms
+            mm_exposure = market_making_results.get('total_exposure', 0)
+            qf_exposure = quick_flip_results.get('total_capital_used', 0)
+            arb_exposure = arbitrage_results.get('arbitrage_exposure', 0)
+
+            mm_return_rate = (market_making_results.get('expected_profit', 0) / mm_exposure) if mm_exposure else 0.0
+            qf_return_rate = (quick_flip_results.get('expected_profit', 0) / qf_exposure) if qf_exposure else 0.0
+            arb_return_rate = (arbitrage_results.get('arbitrage_profit', 0) / arb_exposure) if arb_exposure else 0.0
+
+            # Portfolio expected return (weighted average of return rates)
             portfolio_expected_return = (
-                mm_weight * market_making_results.get('expected_profit', 0) +
+                mm_weight * mm_return_rate +
                 dir_weight * portfolio_allocation.expected_portfolio_return +
-                qf_weight * quick_flip_results.get('expected_profit', 0) +
-                arb_weight * arbitrage_results.get('arbitrage_profit', 0)
+                qf_weight * qf_return_rate +
+                arb_weight * arb_return_rate
             )
             
             # Annualize expected return (assume positions held for 30 days average)

@@ -14,6 +14,8 @@ from src.utils.logging_setup import get_trading_logger
 from src.clients.xai_client import XAIClient
 from src.clients.kalshi_client import KalshiClient
 
+logger = get_trading_logger("decision_helpers")
+
 
 def _calculate_dynamic_quantity(
     balance: float,
@@ -73,9 +75,10 @@ async def make_decision_for_market(
     try:
         # CHECK 1: Daily budget enforcement
         daily_cost = await db_manager.get_daily_ai_cost()
-        if daily_cost >= settings.trading.daily_ai_budget:
+        daily_limit = settings.get_ai_daily_limit()
+        if daily_cost >= daily_limit:
             logger.warning(
-                f"Daily AI budget of ${settings.trading.daily_ai_budget} exceeded. "
+                f"Daily AI budget of ${daily_limit} exceeded. "
                 f"Current cost: ${daily_cost:.3f}. Skipping analysis."
             )
             return None
@@ -139,8 +142,8 @@ async def make_decision_for_market(
                 estimated_cost = 0.01  # Rough estimate for simple analysis
                 total_analysis_cost += estimated_cost
 
-                if decision.side == "YES" and decision.confidence >= settings.trading.high_confidence_threshold:
-                    logger.info(f"High-confidence YES opportunity found for {market.market_id}.")
+                if decision.side in ["YES", "NO"] and decision.confidence >= settings.trading.high_confidence_threshold:
+                    logger.info(f"High-confidence {decision.side} opportunity found for {market.market_id}.")
                     
                     decision_action = "BUY"
                     confidence = decision.confidence
@@ -176,10 +179,13 @@ async def make_decision_for_market(
                                 category_config.max_hold_hours
                             )
                         
+                        # Determine correct entry price based on side
+                        entry_price = market.yes_price if decision.side == "YES" else market.no_price
+                        
                         position = Position(
                             market_id=market.market_id,
                             side=decision.side,
-                            entry_price=market.yes_price,
+                            entry_price=entry_price,
                             quantity=quantity,
                             timestamp=datetime.now(),
                             rationale=f"High-confidence near-expiry YES bet. Category: {market.category}",
@@ -209,9 +215,14 @@ async def make_decision_for_market(
             "volume": market.volume, "expiration_ts": market.expiration_ts,
         }
 
+        # COST OPTIMIZATION: Skip news search if sentiment analysis disabled
+        if not settings.sentiment_analysis or not settings.trading.sentiment_analysis:
+            logger.info("Sentiment analysis disabled; skipping news search")
+            news_summary = "Sentiment analysis disabled. Analysis based on market data only."
+            estimated_search_cost = 0.0
         # COST OPTIMIZATION: Skip expensive news search for low-volume markets
-        if (settings.trading.skip_news_for_low_volume and 
-            market.volume < settings.trading.news_search_volume_threshold):
+        elif (settings.trading.skip_news_for_low_volume and 
+              market.volume < settings.trading.news_search_volume_threshold):
             logger.info(f"Skipping news search for low volume market {market.market_id} (volume: {market.volume})")
             news_summary = f"Low volume market ({market.volume}). Analysis based on market data only."
             estimated_search_cost = 0.0
@@ -235,7 +246,11 @@ async def make_decision_for_market(
         total_analysis_cost += estimated_search_cost
         
         # Check if we're approaching cost limits before making the decision
-        if total_analysis_cost > settings.trading.max_ai_cost_per_decision:
+        per_decision_limit = min(
+            settings.trading.max_ai_cost_per_decision,
+            settings.trading.max_analysis_cost_per_decision
+        )
+        if total_analysis_cost > per_decision_limit:
             logger.warning(f"Analysis cost ${total_analysis_cost:.3f} exceeds per-decision limit. Skipping.")
             # Still record the analysis attempt
             await db_manager.record_market_analysis(
@@ -537,9 +552,6 @@ def get_time_to_expiry_days(market: Market) -> float:
     try:
         if hasattr(market, 'expiration_ts') and market.expiration_ts:
             return max(0.1, (market.expiration_ts - time.time()) / 86400)
-        elif hasattr(market, 'expiration_ts') and market.expiration_ts:
-            expiry_time = datetime.fromtimestamp(market.expiration_ts)
-            return max(0.1, (expiry_time - datetime.now()).total_seconds() / 86400)
         else:
             return 7.0  # Default 7 days
     except Exception as e:

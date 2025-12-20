@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import pytest
+import aiosqlite
 from datetime import datetime, timedelta
 from typing import List
 
@@ -72,4 +73,97 @@ async def test_get_eligible_markets():
     finally:
         # Manual teardown
         if os.path.exists(db_path):
-            os.remove(db_path) 
+            os.remove(db_path)
+
+
+async def test_update_position_status_resets_has_position():
+    db_path = TEST_DB
+    if os.path.exists(db_path):
+        os.remove(db_path)
+
+    manager = DatabaseManager(db_path=db_path)
+    await manager.initialize()
+
+    now = datetime.now()
+    market = Market(
+        market_id="TEST-MARKET-1",
+        title="Test Market",
+        yes_price=0.5,
+        no_price=0.5,
+        volume=1000,
+        expiration_ts=int((now + timedelta(days=5)).timestamp()),
+        category="Test",
+        status="active",
+        last_updated=now,
+        has_position=False
+    )
+    await manager.upsert_markets([market])
+
+    from src.utils.database import Position
+    position = Position(
+        market_id="TEST-MARKET-1",
+        side="YES",
+        entry_price=0.5,
+        quantity=10,
+        timestamp=now,
+        strategy="directional_trading"
+    )
+
+    position_id = await manager.add_position(position)
+    assert position_id is not None
+
+    await manager.update_position_status(position_id, "closed")
+
+    async with aiosqlite.connect(db_path) as db:
+        cursor = await db.execute(
+            "SELECT has_position FROM markets WHERE market_id = ?",
+            ("TEST-MARKET-1",)
+        )
+        row = await cursor.fetchone()
+        assert row[0] == 0
+
+    if os.path.exists(db_path):
+        os.remove(db_path)
+
+
+async def test_get_open_positions_includes_strategy():
+    db_path = TEST_DB
+    if os.path.exists(db_path):
+        os.remove(db_path)
+
+    manager = DatabaseManager(db_path=db_path)
+    await manager.initialize()
+
+    now = datetime.now()
+    market = Market(
+        market_id="TEST-MARKET-2",
+        title="Test Market 2",
+        yes_price=0.5,
+        no_price=0.5,
+        volume=1000,
+        expiration_ts=int((now + timedelta(days=5)).timestamp()),
+        category="Test",
+        status="active",
+        last_updated=now,
+        has_position=False
+    )
+    await manager.upsert_markets([market])
+
+    from src.utils.database import Position
+    position = Position(
+        market_id="TEST-MARKET-2",
+        side="NO",
+        entry_price=0.4,
+        quantity=5,
+        timestamp=now,
+        strategy="quick_flip_scalping"
+    )
+    position_id = await manager.add_position(position)
+    assert position_id is not None
+
+    open_positions = await manager.get_open_positions()
+    assert open_positions
+    assert open_positions[0].strategy == "quick_flip_scalping"
+
+    if os.path.exists(db_path):
+        os.remove(db_path)

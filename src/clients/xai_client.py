@@ -118,15 +118,14 @@ class XAIClient(TradingLoggerMixin):
                 if tracker.date != today:
                     tracker = DailyUsageTracker(
                         date=today,
-                        daily_limit=tracker.daily_limit  # Keep same limit
+                        daily_limit=settings.get_ai_daily_limit()
                     )
                 return tracker
         except Exception as e:
             self.logger.warning(f"Failed to load daily tracker: {e}")
         
         # Create new tracker
-        daily_limit = getattr(settings.trading, 'daily_ai_cost_limit', 50.0)
-        return DailyUsageTracker(date=today, daily_limit=daily_limit)
+        return DailyUsageTracker(date=today, daily_limit=settings.get_ai_daily_limit())
 
     def _save_daily_tracker(self):
         """Save daily usage tracker to disk."""
@@ -422,6 +421,26 @@ Provide a brief, factual summary under {max_length//2} words. If no current info
         
         return search_result
     
+    def _truncate_news_summary(self, text: str, max_length: int) -> str:
+        """
+        Truncate news summary to a target length while keeping sentences intact.
+        """
+        if not text:
+            return ""
+            
+        if len(text) <= max_length:
+            return text
+            
+        # Try to cut at the last sentence ending before max_length
+        truncated = text[:max_length]
+        last_period = truncated.rfind('.')
+        
+        if last_period > max_length * 0.5:  # If we found a period in the second half
+            return truncated[:last_period+1]
+            
+        # Fallback: just cut at max_length with ellipsis
+        return truncated.strip() + "..."
+
     def _get_fallback_context(self, query: str, max_length: int) -> str:
         """
         Provide meaningful fallback context when search fails.
@@ -509,7 +528,7 @@ Provide a brief, factual summary under {max_length//2} words. If no current info
                 avg_confidence = (primary_decision.confidence + secondary_decision.confidence) / 2
                 
                 self.logger.info(
-                    f"✅ ENSEMBLE CONSENSUS: {primary_decision.action} {primary_decision.side} "
+                    f"✅ [ENSEMBLE CONSENSUS] Action: {primary_decision.action}, Side: {primary_decision.side} "
                     f"(Grok-4: {primary_decision.confidence:.1%}, Grok-3: {secondary_decision.confidence:.1%})"
                 )
                 
@@ -518,11 +537,11 @@ Provide a brief, factual summary under {max_length//2} words. If no current info
                     side=primary_decision.side,
                     confidence=avg_confidence,
                     limit_price=primary_decision.limit_price,
-                    reasoning=f"[ENSEMBLE] Grok-4 + Grok-3 consensus. {primary_decision.reasoning}"
+                    reasoning=f"[MULTI-AGENT ENSEMBLE] Grok-4 + Grok-3 consensus. {primary_decision.reasoning}"
                 )
             else:
                 self.logger.info(
-                    f"⚠️ ENSEMBLE DISAGREEMENT: "
+                    f"⚠️ [ENSEMBLE DISAGREEMENT] Decision blocked due to lack of consensus. "
                     f"Grok-4: {primary_decision.action}/{primary_decision.side} ({primary_decision.confidence:.1%}), "
                     f"Grok-3: {secondary_decision.action}/{secondary_decision.side} ({secondary_decision.confidence:.1%})"
                 )
@@ -545,20 +564,51 @@ Provide a brief, factual summary under {max_length//2} words. If no current info
         """
         try:
             # First try with full prompt
+            self.logger.info("🤖 [MULTI-AGENT] Requesting analyzer/critic/trader workflow analysis...")
             decision = await self._get_trading_decision_with_prompt(
                 market_data, portfolio_data, news_summary, ml_prediction, use_simplified=False
             )
             
             if decision:
+                self.logger.info(f"✅ [MULTI-AGENT] Analysis complete: {decision.action} {decision.side} (conf: {decision.confidence:.1%})")
                 return decision
             
             # If that fails, try with simplified prompt
-            self.logger.info("Trying simplified prompt for trading decision")
+            self.logger.info("⚠️ [FALLBACK] Full multi-agent analysis failed or was empty. Trying SIMPLIFIED single-agent prompt...")
             decision = await self._get_trading_decision_with_prompt(
                 market_data, portfolio_data, news_summary, ml_prediction, use_simplified=True
             )
             
-            return decision
+            if decision:
+                self.logger.info(f"✅ [SIMPLIFIED] Fallout decision obtained: {decision.action} {decision.side}")
+            else:
+                self.logger.warning("❌ [FAILED] All decision pathways failed to return a valid decision.")
+
+            if decision:
+                return decision
+
+            # Fallback to OpenAI client if configured
+            if settings.api.openai_api_key:
+                try:
+                    from src.clients.openai_client import OpenAIClient
+                    openai_client = OpenAIClient(api_key=settings.api.openai_api_key)
+                    fallback = await openai_client.get_trading_decision(
+                        market_data=market_data,
+                        portfolio_data=portfolio_data,
+                        news_summary=news_summary
+                    )
+                    if fallback:
+                        return TradingDecision(
+                            action=fallback.action.upper(),
+                            side=fallback.side.upper(),
+                            confidence=fallback.confidence,
+                            limit_price=None,
+                            reasoning=f"[OPENAI FALLBACK] {fallback.reasoning}"
+                        )
+                except Exception as e:
+                    self.logger.warning(f"OpenAI fallback failed: {e}")
+
+            return None
             
         except Exception as e:
             self.logger.error(f"Error getting trading decision: {str(e)}")
@@ -614,7 +664,8 @@ Provide a brief, factual summary under {max_length//2} words. If no current info
         """
         # technical analysis context
         ml_context = "No technical analysis available."
-        if ml_prediction and getattr(settings.trading, 'enable_ml_predictions', True):
+        if (ml_prediction and getattr(settings.trading, 'enable_ml_predictions', True) and
+                ml_prediction.confidence >= getattr(settings.trading, 'ml_confidence_threshold', 0.0)):
             ml_context = self.ml_predictor.format_for_prompt(ml_prediction)
 
         # Extract key information
@@ -659,7 +710,8 @@ Required format:
         
         # technical analysis context
         ml_context = "No technical analysis available."
-        if ml_prediction and getattr(settings.trading, 'enable_ml_predictions', True):
+        if (ml_prediction and getattr(settings.trading, 'enable_ml_predictions', True) and
+                ml_prediction.confidence >= getattr(settings.trading, 'ml_confidence_threshold', 0.0)):
             ml_context = self.ml_predictor.format_for_prompt(ml_prediction)
 
         # Use the existing comprehensive prompt
@@ -699,7 +751,18 @@ Required format:
                     self.logger.warning("No JSON found in trading decision response")
                     return None
             
-            decision_data = json.loads(json_str)
+            try:
+                decision_data = json.loads(json_str)
+            except Exception as json_err:
+                # Attempt to repair malformed JSON
+                try:
+                    from json_repair import repair_json
+                    repaired = repair_json(json_str)
+                    decision_data = json.loads(repaired)
+                    self.logger.info("🔧 Successfully repaired malformed JSON response from model.")
+                except:
+                    self.logger.error(f"❌ JSON Parsing failed even after repair attempt: {json_err}")
+                    return None
             
             # Normalize the action
             action = decision_data.get('action', 'SKIP').upper()

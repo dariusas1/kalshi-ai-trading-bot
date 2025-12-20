@@ -44,6 +44,7 @@ class MarketOpportunity:
     """Represents a trading opportunity with all required metrics for optimization."""
     market_id: str
     market_title: str
+    category: str
     predicted_probability: float
     market_probability: float
     confidence: float
@@ -186,6 +187,12 @@ class AdvancedPortfolioOptimizer:
             # Step 4: Apply correlation adjustments
             correlation_matrix = await self._estimate_correlation_matrix(enhanced_opportunities)
             adjusted_fractions = self._apply_correlation_adjustments(kelly_fractions, correlation_matrix)
+
+            # Step 4.2: Apply risk parity adjustment if enabled
+            if getattr(settings.trading, 'use_risk_parity', True):
+                adjusted_fractions = self._apply_risk_parity_adjustment(
+                    enhanced_opportunities, adjusted_fractions
+                )
             
             # Step 5: Multi-objective optimization
             optimal_allocation = self._multi_objective_optimization(
@@ -238,6 +245,7 @@ class AdvancedPortfolioOptimizer:
                 enhanced_opp = MarketOpportunity(
                     market_id=opp.market_id,
                     market_title=opp.market_title,
+                    category=opp.category,
                     predicted_probability=opp.predicted_probability,
                     market_probability=opp.market_probability,
                     confidence=opp.confidence,
@@ -273,26 +281,49 @@ class AdvancedPortfolioOptimizer:
         - Kelly Criterion Extension for dynamic market environments
         """
         kelly_fractions = {}
+
+        if not getattr(settings.trading, 'use_kelly_criterion', True):
+            fixed_fraction = min(
+                settings.trading.default_position_size / 100,
+                self.max_position_fraction
+            )
+            for opp in opportunities:
+                kelly_fractions[opp.market_id] = fixed_fraction * opp.confidence
+            return kelly_fractions
         
         for opp in opportunities:
             try:
                 # Calculate basic Kelly fraction: f* = (bp - q) / b
                 # Where p = win probability, q = lose probability, b = odds
                 
-                win_prob = opp.predicted_probability
-                lose_prob = 1 - win_prob
+                # Calculate win probability and odds based on the side being traded
+                if opp.edge > 0:  # Betting YES
+                    win_prob = opp.predicted_probability
+                    lose_prob = 1 - win_prob
+                    if opp.market_probability > 0 and opp.market_probability < 1:
+                        odds = (1 - opp.market_probability) / opp.market_probability
+                    else:
+                        odds = 1.0
+                else:  # Betting NO
+                    win_prob = 1 - opp.predicted_probability
+                    lose_prob = 1 - win_prob
+                    # Odds for NO = P(YES) / P(NO)
+                    if opp.market_probability > 0 and opp.market_probability < 1:
+                        odds = opp.market_probability / (1 - opp.market_probability)
+                    else:
+                        odds = 1.0
                 
-                # Calculate odds from market price
-                if opp.market_probability > 0 and opp.market_probability < 1:
-                    odds = (1 - opp.market_probability) / opp.market_probability
-                else:
-                    odds = 1.0
-                
-                # Standard Kelly calculation
-                if opp.edge > 0 and win_prob > 0.5:
+                # Standard Kelly calculation - FIXED to handle both sides
+                # Kelly works as long as (odds * win_prob - lose_prob) > 0 (i.e. positive expected value)
+                if (odds * win_prob - lose_prob) > 0:
                     kelly_standard = (odds * win_prob - lose_prob) / odds
                 else:
                     kelly_standard = 0.0
+
+                # Apply fee/slippage haircut to avoid over-sizing
+                fee_rate = getattr(settings.trading, 'kalshi_fee_rate', 0.01)
+                slippage = getattr(settings.trading, 'expected_slippage', 0.005)
+                kelly_standard *= max(0.0, 1.0 - (fee_rate + slippage))
                 
                 # Apply Kelly Criterion Extension for dynamic markets
                 # Adjust for market regime and time decay
@@ -323,7 +354,14 @@ class AdvancedPortfolioOptimizer:
                 else:
                     final_kelly = fractional_kelly
 
+                # Cap Kelly in high-volatility regimes
+                volatility_cap = getattr(settings.trading, 'high_volatility_kelly_cap', 0.5)
+                if opp.volatility > getattr(settings.trading, 'volatility_baseline', 0.15) * 1.5:
+                    final_kelly = min(final_kelly, self.max_position_fraction * volatility_cap)
+
                 # Ensure reasonable bounds
+                if opp.confidence < settings.trading.min_confidence_for_large_size:
+                    final_kelly = min(final_kelly, self.max_position_fraction * 0.5)
                 final_kelly = max(0.0, min(self.max_position_fraction, final_kelly))
                 
                 # Store calculations
@@ -532,7 +570,7 @@ class AdvancedPortfolioOptimizer:
             return None  # Return None so caller uses heuristic fallback
 
     def _apply_correlation_adjustments(
-        self, 
+        self,
         kelly_fractions: Dict[str, float], 
         correlation_matrix: np.ndarray
     ) -> Dict[str, float]:
@@ -570,6 +608,33 @@ class AdvancedPortfolioOptimizer:
             self.logger.error(f"Error applying correlation adjustments: {e}")
         
         return adjusted_fractions
+
+    def _apply_risk_parity_adjustment(
+        self,
+        opportunities: List[MarketOpportunity],
+        weights: Dict[str, float]
+    ) -> Dict[str, float]:
+        """
+        Apply a simple risk parity adjustment using inverse volatility weighting.
+        """
+        if not opportunities:
+            return weights
+
+        inv_vol = {}
+        for opp in opportunities:
+            vol = max(opp.volatility, 1e-6)
+            inv_vol[opp.market_id] = 1.0 / vol
+
+        total_inv_vol = sum(inv_vol.values()) or 1.0
+        risk_parity = {k: v / total_inv_vol for k, v in inv_vol.items()}
+
+        blended = {}
+        for opp in opportunities:
+            base = weights.get(opp.market_id, 0.0)
+            rp = risk_parity.get(opp.market_id, 0.0)
+            blended[opp.market_id] = 0.5 * base + 0.5 * rp
+
+        return blended
 
     def _multi_objective_optimization(
         self,
@@ -756,6 +821,8 @@ class AdvancedPortfolioOptimizer:
         try:
             constrained_allocation = {}
             total_allocation = 0.0
+            sector_allocations: Dict[str, float] = {}
+            max_sector = getattr(settings.trading, "max_sector_exposure", 1.0)
             
             for market_id, fraction in allocation.items():
                 # Find the opportunity
@@ -771,16 +838,25 @@ class AdvancedPortfolioOptimizer:
                 # Apply maximum position fraction
                 final_fraction = min(fraction, self.max_position_fraction)
                 
+                # Check sector exposure
+                current_sector = sector_allocations.get(opp.category, 0.0)
+                if current_sector + final_fraction > max_sector:
+                    continue
+
                 # Check if this would exceed total capital
                 if total_allocation + final_fraction <= 1.0:
                     constrained_allocation[market_id] = final_fraction
                     total_allocation += final_fraction
+                    sector_allocations[opp.category] = current_sector + final_fraction
                 else:
                     # Scale down to fit remaining capital
                     remaining = 1.0 - total_allocation
                     if remaining > 0.001:
+                        if current_sector + remaining > max_sector:
+                            break
                         constrained_allocation[market_id] = remaining
                         total_allocation = 1.0
+                        sector_allocations[opp.category] = current_sector + remaining
                     break
             
             self.logger.info(f"Risk constraints applied. Total allocation: {total_allocation:.3f}")
@@ -817,7 +893,9 @@ class AdvancedPortfolioOptimizer:
             # Portfolio volatility
             n = len(allocated_opps)
             if n > 1:
-                allocated_corr_matrix = correlation_matrix[:n, :n]
+                index_map = {opp.market_id: idx for idx, opp in enumerate(opportunities)}
+                allocated_indices = [index_map[opp.market_id] for opp in allocated_opps]
+                allocated_corr_matrix = correlation_matrix[np.ix_(allocated_indices, allocated_indices)]
                 covariance_matrix = np.outer(volatilities, volatilities) * allocated_corr_matrix
                 portfolio_vol = np.sqrt(np.dot(weights, np.dot(covariance_matrix, weights)))
             else:
@@ -973,7 +1051,7 @@ async def create_market_opportunities_from_markets(
     markets = filtered_markets
     
     # Limit markets to prevent excessive AI costs and focus on best opportunities
-    max_markets_to_analyze = 10  # REDUCED: More selective (was 20, now 10) to focus on highest quality
+    max_markets_to_analyze = max(5, settings.trading.num_processor_workers * 2)
     if len(markets) > max_markets_to_analyze:
         # Sort by volume and take top markets
         markets = sorted(markets, key=lambda m: m.volume, reverse=True)[:max_markets_to_analyze]
@@ -993,12 +1071,19 @@ async def create_market_opportunities_from_markets(
             # Skip markets with extreme prices (too risky for portfolio)
             if market_prob < 0.05 or market_prob > 0.95:
                 continue
+
+            # Skip markets with insufficient price movement from 50/50
+            if abs(market_prob - 0.5) < settings.trading.min_price_movement:
+                continue
             
             # Get technical analysis if enabled
             ml_prediction = None
             if getattr(settings.trading, 'enable_ml_predictions', True):
                 try:
                     ml_prediction = await xai_client.ml_predictor.get_prediction(market.market_id)
+                    if (ml_prediction and
+                            ml_prediction.confidence < settings.trading.ml_confidence_threshold):
+                        ml_prediction = None
                 except Exception as ml_e:
                     logger.warning(f"ML prediction failed for {market.market_id}: {ml_e}")
 
@@ -1010,6 +1095,13 @@ async def create_market_opportunities_from_markets(
             # If AI analysis failed, skip this market
             if predicted_prob is None or confidence is None:
                 logger.warning(f"AI analysis failed for {market.market_id}, skipping")
+                continue
+
+            if confidence < settings.trading.min_confidence_to_trade:
+                logger.info(
+                    f"Skipping {market.market_id} due to low confidence "
+                    f"({confidence:.1%} < {settings.trading.min_confidence_to_trade:.1%})"
+                )
                 continue
             
             # Calculate metrics
@@ -1033,6 +1125,7 @@ async def create_market_opportunities_from_markets(
                 opportunity = MarketOpportunity(
                     market_id=market.market_id,
                     market_title=market.title,
+                    category=market.category,
                     predicted_probability=predicted_prob,
                     market_probability=market_prob,
                     confidence=confidence,
@@ -1060,7 +1153,9 @@ async def create_market_opportunities_from_markets(
                 
                 # 🚀 IMMEDIATE TRADING: Place trade for strong opportunities
                 if db_manager:
-                    await _evaluate_immediate_trade(opportunity, db_manager, kalshi_client, total_capital)
+                    await _evaluate_immediate_trade(
+                        opportunity, db_manager, kalshi_client, xai_client, total_capital
+                    )
             else:
                 logger.info(f"❌ EDGE FILTERED: {market.market_id} - {edge_result.reason}")
             
@@ -1075,6 +1170,7 @@ async def _evaluate_immediate_trade(
     opportunity: MarketOpportunity, 
     db_manager: DatabaseManager, 
     kalshi_client: KalshiClient, 
+    xai_client: XAIClient,
     total_capital: float
 ) -> None:
     """
@@ -1222,8 +1318,22 @@ async def _evaluate_immediate_trade(
             return
         
         # 🚀 STRONG OPPORTUNITY - TRADE IMMEDIATELY!
-        logger.info(f"🚀 IMMEDIATE TRADE: {opportunity.market_id} - Edge: {opportunity.edge:.1%}, Confidence: {opportunity.confidence:.1%}")
+        logger.info(f"🚀 POTENTIAL IMMEDIATE TRADE: {opportunity.market_id} - Edge: {opportunity.edge:.1%}, Confidence: {opportunity.confidence:.1%}")
         
+        # Verify with Deep Research before pulling the trigger
+        # This prevents "fast" but wrong decisions on high-stakes trades
+        logger.info(f"🕵️ Running DEEP RESEARCH verification for {opportunity.market_id}...")
+        
+        verification_passed, verif_reason = await _verify_with_deep_research(
+            opportunity, db_manager, kalshi_client, xai_client
+        )
+        
+        if not verification_passed:
+            logger.info(f"🛑 Deep research REJECTED trade for {opportunity.market_id}: {verif_reason}")
+            return
+            
+        logger.info(f"✅ Deep research APPROVED trade for {opportunity.market_id}: {verif_reason}")
+
         # Use the position size that was already calculated and validated above
         position_size = initial_position_size
         
@@ -1285,7 +1395,7 @@ async def _evaluate_immediate_trade(
             entry_price=entry_price,
             live=False,  # Will be set to True ONLY after successful execution
             timestamp=datetime.now(),
-            rationale=f"IMMEDIATE TRADE: Edge={opportunity.edge:.1%}, Conf={opportunity.confidence:.1%}, Kelly={kelly_fraction:.1%}, Stop={exit_levels['stop_loss_pct']}%",
+            rationale=f"IMMEDIATE TRADE: Edge={opportunity.edge:.1%}, Conf={opportunity.confidence:.1%}, Kelly={kelly_fraction:.1%}, Stop={exit_levels['stop_loss_pct']}% | Deep Research: {verif_reason}",
             strategy="immediate_portfolio_optimization",
             
             # Enhanced exit strategy using Grok4 recommendations
@@ -1345,6 +1455,78 @@ async def _evaluate_immediate_trade(
         
     except Exception as e:
         logger.error(f"Error in immediate trade evaluation for {opportunity.market_id}: {e}")
+
+async def _verify_with_deep_research(
+    opportunity: MarketOpportunity,
+    db_manager: DatabaseManager,
+    kalshi_client: KalshiClient,
+    xai_client: XAIClient
+) -> Tuple[bool, str]:
+    """
+    Perform a deep research verification for a potential trade.
+    Returns (approved, reason).
+    """
+    try:
+        # 1. Fetch full market details including recent news/activity if possible
+        # For now we use what we have in opportunity, but properly formatted
+        
+        market_data = {
+            'title': opportunity.market_title,
+            'yes_price': int(opportunity.market_probability * 100),  # approx
+            'no_price': int((1 - opportunity.market_probability) * 100), # approx
+            'volume': 0, # We might not have this in opportunity, default to 0
+            'days_to_expiry': opportunity.time_to_expiry,
+            # 'rules': ... # We'd ideally want rules here
+        }
+        
+        # 2. Get AI decision with FULL reasoning (not simplified)
+        # We pass empty portfolio data as we just want an opinion on the trade itself
+        portfolio_data = {
+            'cash': 10000,   # Dummy values for independent assessment
+            'balance': 10000
+        }
+        
+        # Use existing news summary if we have it, or empty
+        news_summary = "" 
+        
+        decision = await xai_client.get_trading_decision(
+            market_data, 
+            portfolio_data, 
+            news_summary,
+            ml_prediction=None # Avoid biasing with same ML pred if possible, or pass it if trusted
+        )
+        
+        if not decision:
+            return False, "AI failed to generate a decision"
+            
+        # 3. Compare with our opportunistic decision
+        intended_side = "NO" if opportunity.edge < 0 else "YES"
+        
+        if decision.action != "BUY":
+            return False, f"Deep research recommends {decision.action} instead of BUY"
+            
+        if decision.side != intended_side:
+            return False, f"Deep research recommends {decision.side}, but we wanted {intended_side}"
+            
+        if decision.confidence < 0.6: # High bar for confirmation
+            return False, f"Deep research confidence {decision.confidence:.1%} too low (<60%)"
+            
+        # 4. Special Check: 99% Probability Trap
+        # If AI says BUY YES at 99c, it better be 100% sure.
+        if intended_side == "YES" and opportunity.market_probability > 0.95:
+             if decision.confidence < 0.95:
+                 return False, f"Buying {intended_side} at >95% prob requires >95% confidence (got {decision.confidence:.1%})"
+                 
+        if intended_side == "NO" and opportunity.market_probability < 0.05:
+             # Selling NO at 5c is buying NO at 95%
+             if decision.confidence < 0.95:
+                 return False, f"Buying {intended_side} (short YES) at \u003c5% prob requires >95% confidence (got {decision.confidence:.1%})"
+
+        return True, f"Confirmed {intended_side} with {decision.confidence:.1%} confidence. Reasoning: {decision.reasoning[:100]}..."
+        
+    except Exception as e:
+        logging.getLogger("deep_research").error(f"Error in deep research: {e}")
+        return False, f"Deep research error: {str(e)}"
 
 def _calculate_simple_kelly(opportunity: MarketOpportunity) -> float:
     """Calculate simple Kelly fraction for immediate trading."""

@@ -16,7 +16,7 @@ from structlog import configure, get_logger
 from src.config.settings import settings
 
 
-def setup_logging(log_level: str = "INFO") -> None:
+def setup_logging(log_level: Optional[str] = None) -> None:
     """
     Set up structured logging for the trading system.
     Creates a new log file for each run with timestamp.
@@ -30,9 +30,13 @@ def setup_logging(log_level: str = "INFO") -> None:
     logs_dir = Path("logs")
     logs_dir.mkdir(exist_ok=True)
     
-    # Create timestamped log file name
+    # Create log file name (use configured base path if provided)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = logs_dir / f"trading_system_{timestamp}.log"
+    configured_log_file = Path(settings.logging.log_file)
+    if configured_log_file.name == "trading_system.log":
+        log_file = logs_dir / f"trading_system_{timestamp}.log"
+    else:
+        log_file = configured_log_file
     
     # Create a "latest.log" symlink/copy for easy access
     latest_log = logs_dir / "latest.log"
@@ -59,15 +63,29 @@ def setup_logging(log_level: str = "INFO") -> None:
         cache_logger_on_first_use=True,
     )
     
+    # Resolve logging settings (allow TradingConfig override)
+    effective_level = log_level or settings.trading.log_level or settings.logging.log_level
+    handlers = []
+
+    if settings.logging.enable_file_logging:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(
+            logging.handlers.RotatingFileHandler(
+                log_file,
+                maxBytes=settings.logging.max_log_file_size,
+                backupCount=settings.logging.backup_count,
+            )
+        )
+        handlers.append(logging.FileHandler(latest_log, mode='w'))
+
+    if settings.logging.enable_console_logging:
+        handlers.append(logging.StreamHandler(sys.stdout))
+
     # Configure standard library logging
     logging.basicConfig(
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        level=getattr(logging, log_level.upper()),
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.FileHandler(latest_log, mode='w'),
-            logging.StreamHandler(sys.stdout),
-        ],
+        format=settings.logging.log_format,
+        level=getattr(logging, effective_level.upper()),
+        handlers=handlers,
     )
     
     # Log startup message
@@ -76,9 +94,9 @@ def setup_logging(log_level: str = "INFO") -> None:
         "Logging system initialized",
         log_file=str(log_file),
         latest_log=str(latest_log),
-        log_level=log_level,
-        console_enabled=True,
-        file_enabled=True
+        log_level=effective_level,
+        console_enabled=settings.logging.enable_console_logging,
+        file_enabled=settings.logging.enable_file_logging
     )
 
 

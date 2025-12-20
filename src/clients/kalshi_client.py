@@ -68,8 +68,33 @@ class KalshiClient(TradingLoggerMixin):
         self.logger.info("Kalshi client initialized", api_key_length=len(self.api_key) if self.api_key else 0)
     
     def _load_private_key(self) -> None:
-        """Load private key from file."""
+        """
+        Load private key from environment variable or file.
+        
+        Priority:
+        1. KALSHI_PRIVATE_KEY env var (base64 encoded PEM) - for Railway/cloud deployment
+        2. File path (default: kalshi_private_key) - for local development
+        """
+        import os
+        import base64
+        
         try:
+            # First, try loading from environment variable (for Railway deployment)
+            env_private_key = os.environ.get('KALSHI_PRIVATE_KEY')
+            if env_private_key:
+                try:
+                    # Decode from base64
+                    key_bytes = base64.b64decode(env_private_key)
+                    self.private_key = serialization.load_pem_private_key(
+                        key_bytes,
+                        password=None
+                    )
+                    self.logger.info("Private key loaded successfully from environment variable")
+                    return
+                except Exception as e:
+                    self.logger.warning(f"Failed to load private key from env var: {e}, trying file path...")
+            
+            # Fall back to loading from file (for local development)
             private_key_path = Path(self.private_key_path)
             if not private_key_path.exists():
                 raise KalshiAPIError(f"Private key file not found: {self.private_key_path}")
@@ -79,7 +104,7 @@ class KalshiClient(TradingLoggerMixin):
                     f.read(),
                     password=None
                 )
-            self.logger.info("Private key loaded successfully")
+            self.logger.info("Private key loaded successfully from file")
         except Exception as e:
             self.logger.error("Failed to load private key", error=str(e))
             raise KalshiAPIError(f"Failed to load private key: {e}")

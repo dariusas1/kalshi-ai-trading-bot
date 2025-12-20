@@ -74,14 +74,20 @@ async def analyze_ai_costs(db_manager: DatabaseManager) -> Dict:
     # Generate recommendations
     recommendations = []
     
-    if today_cost > settings.trading.daily_ai_budget * 0.8:
-        recommendations.append(f"⚠️  Near daily budget limit: ${today_cost:.3f} / ${settings.trading.daily_ai_budget}")
+    soft_budget = settings.trading.daily_ai_budget
+    hard_limit = settings.get_ai_daily_limit()
+
+    if today_cost > soft_budget * 0.8:
+        recommendations.append(f"⚠️  Near daily budget target: ${today_cost:.3f} / ${soft_budget}")
     
     if cost_per_decision > settings.trading.max_ai_cost_per_decision:
         recommendations.append(f"💰 High cost per decision: ${cost_per_decision:.3f}")
     
-    if weekly_cost > settings.trading.daily_ai_budget * 5:  # More than 5 days of budget in a week
+    if weekly_cost > soft_budget * 5:  # More than 5 days of budget in a week
         recommendations.append("📈 Weekly spending trending high - consider tighter controls")
+    
+    if today_cost >= hard_limit:
+        recommendations.append(f"🛑 Daily hard limit reached: ${today_cost:.3f} / ${hard_limit}")
     
     if weekly_analyses > weekly_decisions * 3:  # Too many analyses relative to decisions
         recommendations.append("🔄 High analysis-to-decision ratio - improve filtering")
@@ -95,7 +101,7 @@ async def analyze_ai_costs(db_manager: DatabaseManager) -> Dict:
         cost_per_decision=cost_per_decision,
         weekly_analyses=weekly_analyses,
         weekly_decisions=weekly_decisions,
-        budget_utilization=today_cost / settings.trading.daily_ai_budget,
+        budget_utilization=today_cost / soft_budget,
         recommendations=recommendations
     )
     
@@ -195,7 +201,7 @@ async def run_evaluation():
         
         # Generate overall system health summary
         daily_cost = cost_analysis['daily_costs'][datetime.now().strftime('%Y-%m-%d')]['cost']
-        budget_utilization = daily_cost / settings.trading.daily_ai_budget
+    budget_utilization = daily_cost / soft_budget
         
         health_status = "🟢 HEALTHY"
         if budget_utilization > 0.9:
@@ -212,11 +218,11 @@ async def run_evaluation():
         )
         
         # If costs are high, suggest immediate actions
-        if budget_utilization > 0.8:
-            logger.warning(
-                "HIGH COST ALERT: Consider immediate actions",
-                suggestions=[
-                    "Increase analysis_cooldown_hours",
+    if budget_utilization > 0.8:
+        logger.warning(
+            "HIGH COST ALERT: Consider immediate actions",
+            suggestions=[
+                "Increase analysis_cooldown_hours",
                     "Raise min_volume_for_ai_analysis threshold", 
                     "Enable skip_news_for_low_volume",
                     "Reduce max_analyses_per_market_per_day"

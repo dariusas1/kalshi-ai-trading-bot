@@ -4,8 +4,10 @@ Database manager for the Kalshi trading system.
 
 import aiosqlite
 from dataclasses import dataclass, asdict
+import logging
+import json
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 
 from src.utils.logging_setup import TradingLoggerMixin
 
@@ -88,6 +90,8 @@ class DatabaseManager(TradingLoggerMixin):
     async def initialize(self) -> None:
         """Initialize database schema and run migrations."""
         async with aiosqlite.connect(self.db_path) as db:
+            # Enable WAL mode for concurrent access
+            await db.execute("PRAGMA journal_mode=WAL;")
             await self._create_tables(db)
             await self._run_migrations(db)
             await db.commit()
@@ -136,7 +140,24 @@ class DatabaseManager(TradingLoggerMixin):
                     )
                 """)
                 
-                            # Migration 4: Update existing positions with strategy based on rationale
+            # Migration 4: Add missing columns for enhanced exit strategy
+            if 'stop_loss_price' not in column_names:
+                await db.execute("ALTER TABLE positions ADD COLUMN stop_loss_price REAL")
+                self.logger.info("Added stop_loss_price column to positions table")
+            if 'take_profit_price' not in column_names:
+                await db.execute("ALTER TABLE positions ADD COLUMN take_profit_price REAL")
+                self.logger.info("Added take_profit_price column to positions table")
+            if 'max_hold_hours' not in column_names:
+                await db.execute("ALTER TABLE positions ADD COLUMN max_hold_hours INTEGER")
+                self.logger.info("Added max_hold_hours column to positions table")
+            if 'target_confidence_change' not in column_names:
+                await db.execute("ALTER TABLE positions ADD COLUMN target_confidence_change REAL")
+                self.logger.info("Added target_confidence_change column to positions table")
+            if 'trailing_stop_price' not in column_names:
+                await db.execute("ALTER TABLE positions ADD COLUMN trailing_stop_price REAL")
+                self.logger.info("Added trailing_stop_price column to positions table")
+
+            # Migration 5: Update existing positions with strategy based on rationale
             await self._migrate_existing_strategy_data(db)
             
         except Exception as e:
@@ -343,44 +364,28 @@ class DatabaseManager(TradingLoggerMixin):
         await db.execute("CREATE INDEX IF NOT EXISTS idx_market_analyses_timestamp ON market_analyses(analysis_timestamp)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_daily_cost_date ON daily_cost_tracking(date)")
         
+        # Add trading_settings table for dashboard controls
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS trading_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TEXT
+            )
+        """)
+        
+        # Add analytics_cache table for pre-computed metrics
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS analytics_cache (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                computed_at TEXT
+            )
+        """)
+        
         # Run migrations to ensure schema is up to date
         await self._run_migrations(db)
         
         self.logger.info("Tables created or already exist.")
-
-    async def _run_migrations(self, db: aiosqlite.Connection) -> None:
-        """Run database migrations to ensure schema is up to date."""
-        try:
-            # Check if positions table has the new columns
-            cursor = await db.execute("PRAGMA table_info(positions)")
-            columns = await cursor.fetchall()
-            column_names = [col[1] for col in columns]
-            
-            # Add missing columns for enhanced exit strategy
-            if 'stop_loss_price' not in column_names:
-                await db.execute("ALTER TABLE positions ADD COLUMN stop_loss_price REAL")
-                self.logger.info("Added stop_loss_price column to positions table")
-                
-            if 'take_profit_price' not in column_names:
-                await db.execute("ALTER TABLE positions ADD COLUMN take_profit_price REAL")
-                self.logger.info("Added take_profit_price column to positions table")
-                
-            if 'max_hold_hours' not in column_names:
-                await db.execute("ALTER TABLE positions ADD COLUMN max_hold_hours INTEGER")
-                self.logger.info("Added max_hold_hours column to positions table")
-                
-            if 'target_confidence_change' not in column_names:
-                await db.execute("ALTER TABLE positions ADD COLUMN target_confidence_change REAL")
-                self.logger.info("Added target_confidence_change column to positions table")
-                
-            if 'trailing_stop_price' not in column_names:
-                await db.execute("ALTER TABLE positions ADD COLUMN trailing_stop_price REAL")
-                self.logger.info("Added trailing_stop_price column to positions table")
-                
-            await db.commit()
-            
-        except Exception as e:
-            self.logger.error(f"Error running migrations: {e}")
 
     async def upsert_markets(self, markets: List[Market]):
         """
@@ -522,9 +527,29 @@ class DatabaseManager(TradingLoggerMixin):
             status: The new status ('closed', 'voided').
         """
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("""
-                UPDATE positions SET status = ? WHERE id = ?
-            """, (status, position_id))
+            cursor = await db.execute(
+                "SELECT market_id FROM positions WHERE id = ?",
+                (position_id,)
+            )
+            row = await cursor.fetchone()
+            market_id = row[0] if row else None
+
+            await db.execute(
+                "UPDATE positions SET status = ? WHERE id = ?",
+                (status, position_id)
+            )
+
+            if market_id and status != "open":
+                cursor = await db.execute(
+                    "SELECT COUNT(*) FROM positions WHERE market_id = ? AND status = 'open'",
+                    (market_id,)
+                )
+                open_count = (await cursor.fetchone())[0]
+                if open_count == 0:
+                    await db.execute(
+                        "UPDATE markets SET has_position = 0 WHERE market_id = ?",
+                        (market_id,)
+                    )
             await db.commit()
             self.logger.info(f"Updated position {position_id} status to {status}.")
 
@@ -909,6 +934,34 @@ class DatabaseManager(TradingLoggerMixin):
             row = await cursor.fetchone()
             return row[0] if row else 0.0
 
+    async def get_daily_ai_cost_breakdown(self, date: str = None) -> Dict[str, Any]:
+        """Get detailed AI cost breakdown for a specific date."""
+        if date is None:
+            date = datetime.now().strftime('%Y-%m-%d')
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("""
+                SELECT total_ai_cost, analysis_count 
+                FROM daily_cost_tracking 
+                WHERE date = ?
+            """, (date,))
+            row = await cursor.fetchone()
+            
+            if row:
+                total_cost = row['total_ai_cost']
+                count = row['analysis_count']
+                return {
+                    'total_cost': total_cost,
+                    'request_count': count,
+                    'avg_cost': total_cost / count if count > 0 else 0.0
+                }
+            return {
+                'total_cost': 0.0,
+                'request_count': 0,
+                'avg_cost': 0.0
+            }
+
     async def get_market_analysis_count_today(self, market_id: str) -> int:
         """Get number of times market was analyzed today."""
         today = datetime.now().strftime('%Y-%m-%d')
@@ -1030,11 +1083,12 @@ class DatabaseManager(TradingLoggerMixin):
                     live=bool(row[8]),
                     status=row[9],
                     id=row[0],
-                    stop_loss_price=row[10],
-                    take_profit_price=row[11],
-                    max_hold_hours=row[12],
-                    target_confidence_change=row[13],
-                    trailing_stop_price=row[14]
+                    strategy=row[10],
+                    stop_loss_price=row[11],
+                    take_profit_price=row[12],
+                    max_hold_hours=row[13],
+                    target_confidence_change=row[14],
+                    trailing_stop_price=row[15]
                 )
                 positions.append(position)
             
@@ -1056,13 +1110,17 @@ class DatabaseManager(TradingLoggerMixin):
         try:
             # Get positions from Kalshi
             response = await kalshi_client.get_positions()
-            kalshi_positions = response.get('market_positions', [])
+            kalshi_positions = (
+                response.get('market_positions')
+                or response.get('positions')
+                or []
+            )
             
             # Build set of active Kalshi positions (tickers with non-zero quantity)
             kalshi_active = set()
             for pos in kalshi_positions:
-                ticker = pos.get('ticker', '')
-                position_qty = pos.get('position', 0)
+                ticker = pos.get('ticker') or pos.get('market_id', '')
+                position_qty = pos.get('position', pos.get('quantity', 0))
                 if abs(position_qty) > 0:
                     kalshi_active.add(ticker)
             
@@ -1092,3 +1150,368 @@ class DatabaseManager(TradingLoggerMixin):
         except Exception as e:
             self.logger.error(f"Error syncing with Kalshi: {e}")
             return {'error': str(e)}
+
+    # ==================== DASHBOARD ANALYTICS METHODS ====================
+
+    async def get_pnl_by_period(self, period: str = 'today') -> Dict:
+        """
+        Get P&L metrics for a specific time period.
+        
+        Args:
+            period: 'today', 'week', 'month', or 'all'
+            
+        Returns:
+            Dict with pnl, trades, wins, losses, win_rate
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            
+            # Build date filter based on period
+            if period == 'today':
+                date_filter = "DATE(exit_timestamp) = DATE('now')"
+            elif period == 'week':
+                date_filter = "DATE(exit_timestamp) >= DATE('now', '-7 days')"
+            elif period == 'month':
+                date_filter = "DATE(exit_timestamp) >= DATE('now', '-30 days')"
+            else:  # 'all'
+                date_filter = "1=1"
+            
+            cursor = await db.execute(f"""
+                SELECT 
+                    COUNT(*) as total_trades,
+                    COALESCE(SUM(pnl), 0) as total_pnl,
+                    COALESCE(SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END), 0) as wins,
+                    COALESCE(SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END), 0) as losses,
+                    COALESCE(AVG(pnl), 0) as avg_pnl,
+                    COALESCE(MAX(pnl), 0) as best_trade,
+                    COALESCE(MIN(pnl), 0) as worst_trade
+                FROM trade_logs
+                WHERE {date_filter}
+            """)
+            row = await cursor.fetchone()
+            
+            if row and row['total_trades'] > 0:
+                win_rate = (row['wins'] / row['total_trades']) * 100
+            else:
+                win_rate = 0.0
+            
+            return {
+                'period': period,
+                'total_pnl': row['total_pnl'] if row else 0.0,
+                'total_trades': row['total_trades'] if row else 0,
+                'wins': row['wins'] if row else 0,
+                'losses': row['losses'] if row else 0,
+                'win_rate': win_rate,
+                'avg_pnl': row['avg_pnl'] if row else 0.0,
+                'best_trade': row['best_trade'] if row else 0.0,
+                'worst_trade': row['worst_trade'] if row else 0.0
+            }
+
+    async def get_recent_trades(self, limit: int = 50) -> List[Dict]:
+        """Get recent trade executions for the trade feed."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("""
+                SELECT 
+                    market_id, side, entry_price, exit_price, quantity, 
+                    pnl, exit_timestamp, strategy
+                FROM trade_logs 
+                ORDER BY exit_timestamp DESC 
+                LIMIT ?
+            """, (limit,))
+            rows = await cursor.fetchall()
+            
+            return [dict(row) for row in rows]
+
+    async def get_setting(self, key: str, default: str = None) -> Optional[str]:
+        """Get a trading setting value."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT value FROM trading_settings WHERE key = ?", (key,)
+            )
+            row = await cursor.fetchone()
+            return row[0] if row else default
+
+    async def set_setting(self, key: str, value: str) -> None:
+        """Set a trading setting value."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                INSERT INTO trading_settings (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = ?
+            """, (key, value, datetime.now().isoformat(), value, datetime.now().isoformat()))
+            await db.commit()
+
+    async def get_category_performance(self) -> Dict[str, Dict]:
+        """Get win rate and P&L broken down by market category."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            
+            # Join trade_logs with markets to get category
+            cursor = await db.execute("""
+                SELECT 
+                    m.category,
+                    COUNT(*) as trades,
+                    SUM(CASE WHEN t.pnl > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(t.pnl) as total_pnl,
+                    AVG(t.pnl) as avg_pnl
+                FROM trade_logs t
+                LEFT JOIN markets m ON t.market_id = m.market_id
+                WHERE m.category IS NOT NULL
+                GROUP BY m.category
+                ORDER BY SUM(t.pnl) DESC
+            """)
+            rows = await cursor.fetchall()
+            
+            result = {}
+            for row in rows:
+                category = row['category'] or 'unknown'
+                trades = row['trades']
+                wins = row['wins'] or 0
+                result[category] = {
+                    'trades': trades,
+                    'wins': wins,
+                    'losses': trades - wins,
+                    'win_rate': (wins / trades * 100) if trades > 0 else 0,
+                    'total_pnl': row['total_pnl'] or 0,
+                    'avg_pnl': row['avg_pnl'] or 0
+                }
+            return result
+
+    async def get_hourly_performance(self) -> Dict[int, Dict]:
+        """Get win rate and P&L broken down by hour of day."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            
+            cursor = await db.execute("""
+                SELECT 
+                    CAST(strftime('%H', exit_timestamp) AS INTEGER) as hour,
+                    COUNT(*) as trades,
+                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(pnl) as total_pnl,
+                    AVG(pnl) as avg_pnl
+                FROM trade_logs
+                GROUP BY hour
+                ORDER BY hour
+            """)
+            rows = await cursor.fetchall()
+            
+            result = {}
+            for row in rows:
+                hour = row['hour']
+                trades = row['trades']
+                wins = row['wins'] or 0
+                result[hour] = {
+                    'trades': trades,
+                    'wins': wins,
+                    'win_rate': (wins / trades * 100) if trades > 0 else 0,
+                    'total_pnl': row['total_pnl'] or 0,
+                    'avg_pnl': row['avg_pnl'] or 0
+                }
+            return result
+
+    async def get_expiry_performance(self) -> Dict[str, Dict]:
+        """Get win rate and P&L broken down by time-to-expiry bucket."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            
+            # Calculate hours to expiry at entry time
+            cursor = await db.execute("""
+                SELECT 
+                    CASE 
+                        WHEN (m.expiration_ts - strftime('%s', t.entry_timestamp)) / 3600.0 < 1 THEN '0-1h'
+                        WHEN (m.expiration_ts - strftime('%s', t.entry_timestamp)) / 3600.0 < 6 THEN '1-6h'
+                        WHEN (m.expiration_ts - strftime('%s', t.entry_timestamp)) / 3600.0 < 24 THEN '6-24h'
+                        WHEN (m.expiration_ts - strftime('%s', t.entry_timestamp)) / 3600.0 < 168 THEN '1-7d'
+                        ELSE '7d+'
+                    END as expiry_bucket,
+                    COUNT(*) as trades,
+                    SUM(CASE WHEN t.pnl > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(t.pnl) as total_pnl,
+                    AVG(t.pnl) as avg_pnl
+                FROM trade_logs t
+                LEFT JOIN markets m ON t.market_id = m.market_id
+                WHERE m.expiration_ts IS NOT NULL
+                GROUP BY expiry_bucket
+            """)
+            rows = await cursor.fetchall()
+            
+            result = {}
+            for row in rows:
+                bucket = row['expiry_bucket'] or 'unknown'
+                trades = row['trades']
+                wins = row['wins'] or 0
+                result[bucket] = {
+                    'trades': trades,
+                    'wins': wins,
+                    'win_rate': (wins / trades * 100) if trades > 0 else 0,
+                    'total_pnl': row['total_pnl'] or 0,
+                    'avg_pnl': row['avg_pnl'] or 0
+                }
+            return result
+
+    async def get_confidence_calibration(self) -> List[Dict]:
+        """
+        Get confidence calibration data showing predicted vs actual win rates.
+        
+        Returns list of buckets: {range, avg_confidence, actual_win_rate, trades}
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            
+            cursor = await db.execute("""
+                SELECT 
+                    CASE 
+                        WHEN p.confidence < 0.6 THEN '50-60%'
+                        WHEN p.confidence < 0.7 THEN '60-70%'
+                        WHEN p.confidence < 0.8 THEN '70-80%'
+                        WHEN p.confidence < 0.9 THEN '80-90%'
+                        ELSE '90-100%'
+                    END as bucket,
+                    AVG(p.confidence) as avg_confidence,
+                    COUNT(*) as trades,
+                    SUM(CASE WHEN t.pnl > 0 THEN 1 ELSE 0 END) as wins
+                FROM positions p
+                JOIN trade_logs t ON p.market_id = t.market_id AND p.side = t.side
+                WHERE p.confidence IS NOT NULL
+                GROUP BY bucket
+                ORDER BY avg_confidence
+            """)
+            rows = await cursor.fetchall()
+            
+            result = []
+            for row in rows:
+                trades = row['trades']
+                wins = row['wins'] or 0
+                result.append({
+                    'bucket': row['bucket'],
+                    'avg_confidence': (row['avg_confidence'] or 0) * 100,
+                    'actual_win_rate': (wins / trades * 100) if trades > 0 else 0,
+                    'trades': trades
+                })
+            return result
+
+    async def get_daily_pnl_history(self, days: int = 30) -> List[Dict]:
+        """Get daily P&L for calendar view."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            
+            cursor = await db.execute("""
+                SELECT 
+                    DATE(exit_timestamp) as date,
+                    SUM(pnl) as pnl,
+                    COUNT(*) as trades,
+                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins
+                FROM trade_logs
+                WHERE DATE(exit_timestamp) >= DATE('now', ?)
+                GROUP BY DATE(exit_timestamp)
+                ORDER BY date DESC
+            """, (f'-{days} days',))
+            rows = await cursor.fetchall()
+            
+            return [dict(row) for row in rows]
+
+    async def get_trading_streaks(self) -> Dict:
+        """Get current and max win/loss streaks."""
+        trades = await self.get_recent_trades(limit=500)
+        
+        if not trades:
+            return {'current_streak': 0, 'streak_type': 'none', 
+                    'max_win_streak': 0, 'max_loss_streak': 0}
+        
+        current_streak = 0
+        streak_type = 'none'
+        max_win_streak = 0
+        max_loss_streak = 0
+        temp_win = 0
+        temp_loss = 0
+        
+        for trade in trades:
+            pnl = trade.get('pnl', 0)
+            
+            if pnl > 0:
+                temp_win += 1
+                if temp_loss > max_loss_streak:
+                    max_loss_streak = temp_loss
+                temp_loss = 0
+            else:
+                temp_loss += 1
+                if temp_win > max_win_streak:
+                    max_win_streak = temp_win
+                temp_win = 0
+        
+        # Check final streaks
+        if temp_win > max_win_streak:
+            max_win_streak = temp_win
+        if temp_loss > max_loss_streak:
+            max_loss_streak = temp_loss
+        
+        # Current streak from most recent trades
+        if trades:
+            first_pnl = trades[0].get('pnl', 0)
+            streak_type = 'win' if first_pnl > 0 else 'loss'
+            current_streak = 1
+            for trade in trades[1:]:
+                if (trade.get('pnl', 0) > 0) == (first_pnl > 0):
+                    current_streak += 1
+                else:
+                    break
+        
+        return {
+            'current_streak': current_streak,
+            'streak_type': streak_type,
+            'max_win_streak': max_win_streak,
+            'max_loss_streak': max_loss_streak
+        }
+
+    async def get_ai_cost_history(self, days: int = 30) -> List[Dict]:
+        """
+        Get daily AI cost history for the last N days.
+        
+        Returns:
+            List of dicts with 'date' and 'cost'.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("""
+                SELECT date, total_ai_cost as cost 
+                FROM daily_cost_tracking 
+                ORDER BY date DESC 
+                LIMIT ?
+            """, (days,))
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_cached_analytics(self, key: str) -> Optional[Dict]:
+        """
+        Get cached analytics data by key.
+        
+        Returns:
+            Dict of data or None if not found or expired (> 15 mins).
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("""
+                SELECT value, computed_at FROM analytics_cache WHERE key = ?
+            """, (key,))
+            row = await cursor.fetchone()
+            
+            if row:
+                # Check expiry (optional, processor runs every 5 mins)
+                computed_at = datetime.fromisoformat(row['computed_at'])
+                if (datetime.now() - computed_at).total_seconds() < 900:  # 15 mins
+                    return json.loads(row['value'])
+            return None
+
+    async def set_cached_analytics(self, key: str, value: Dict) -> None:
+        """Set cached analytics data by key."""
+        try:
+            payload = json.dumps(value)
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    "INSERT OR REPLACE INTO analytics_cache (key, value, computed_at) VALUES (?, ?, ?)",
+                    (key, payload, datetime.now().isoformat())
+                )
+                await db.commit()
+        except Exception as e:
+            self.logger.error(f"Error setting analytics cache for {key}: {e}")

@@ -1,0 +1,52 @@
+# Git
+.git
+.gitignore
+
+# Python virtual environments
+venv/
+.venv/
+env/
+.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/
+.cursor/
+
+# Database files (will be created fresh in container)
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+logs/
+*.log
+
+# Private keys (will be injected via env var)
+kalshi_private_key
+*.key
+
+# Test files
+tests/
+test_*.py
+*_test.py
+
+# Documentation
+*.md
+!README.md
+
+# Performance analysis files
+performance_analysis_*.json
+grok4_*.txt
+
+# macOS
+.DS_Store
+
+# Development tools
+requirements-dev.txt

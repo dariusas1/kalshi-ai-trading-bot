@@ -8,6 +8,10 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
 
+
+def _env_flag(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "on")
+
 # Load environment variables
 load_dotenv()
 
@@ -16,10 +20,10 @@ load_dotenv()
 class APIConfig:
     """API configuration settings."""
     kalshi_api_key: str = field(default_factory=lambda: os.getenv("KALSHI_API_KEY", ""))
-    kalshi_base_url: str = "https://api.elections.kalshi.com"  # Updated to new API endpoint
+    kalshi_base_url: str = field(default_factory=lambda: os.getenv("KALSHI_BASE_URL", "https://api.elections.kalshi.com"))
     openai_api_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", ""))
     xai_api_key: str = field(default_factory=lambda: os.getenv("XAI_API_KEY", ""))
-    openai_base_url: str = "https://api.openai.com/v1"
+    openai_base_url: str = field(default_factory=lambda: os.getenv("OPENAI_BASE_URL", "https://api.cometapi.com/v1"))
 
 
 # Trading strategy configuration - INCREASED AGGRESSIVENESS
@@ -31,6 +35,7 @@ class TradingConfig:
     max_daily_loss_pct: float = 8.0    # Max 8% daily loss limit
     max_positions: int = 6              # Max 6 concurrent positions
     min_balance: float = 25.0           # REDUCED: Lower minimum to trade more (was 100)
+    live_trading_enabled: bool = field(default_factory=lambda: _env_flag("LIVE_TRADING_ENABLED", "false"))
     
     # Market filtering criteria - MUCH MORE PERMISSIVE
     min_volume: float = 750.0            # Minimum volume to consider market
@@ -54,7 +59,10 @@ class TradingConfig:
     use_kelly_criterion: bool = True        # Use Kelly Criterion for position sizing (PRIMARY METHOD)
     kelly_fraction: float = 0.55           # 55% Kelly fraction (balanced aggressiveness)
     max_single_position: float = 0.04       # Max 4% in single position
-    
+    kalshi_fee_rate: float = 0.01          # Estimated fee rate per contract
+    expected_slippage: float = 0.005       # Slippage haircut on edge/returns
+    high_volatility_kelly_cap: float = 0.5  # Cap Kelly fraction in high-volatility regimes
+
     # Trading frequency - MORE FREQUENT
     market_scan_interval: int = 90      # 90 second scan interval
     position_check_interval: int = 30       # Check positions every 30 seconds
@@ -71,6 +79,7 @@ class TradingConfig:
     # Market selection preferences
     preferred_categories: List[str] = field(default_factory=lambda: [])
     excluded_categories: List[str] = field(default_factory=lambda: [])
+    category_blacklist: List[str] = field(default_factory=lambda: [])
     
     # High-confidence, near-expiry strategy
     enable_high_confidence_strategy: bool = True
@@ -100,6 +109,8 @@ class TradingConfig:
 
     # Enhanced market filtering to reduce analyses - MORE PERMISSIVE
     min_volume_for_ai_analysis: float = 1000.0  # DECREASED: Much lower threshold (was 500, now 200)
+    skip_news_for_low_volume: bool = True
+    news_search_volume_threshold: float = 1000.0
     exclude_low_liquidity_categories: List[str] = field(default_factory=lambda: [
         # REMOVED weather and entertainment - trade all categories
     ])
@@ -121,15 +132,99 @@ class TradingConfig:
     ml_lookback_hours: int = 168  # 7 days
     ml_confidence_threshold: float = 0.60
 
+    # === EXECUTION QUALITY ===
+    market_order_price_buffer_cents: int = 2  # Cap market orders at ask + buffer
+
+    # === INTRADAY RISK THROTTLES ===
+    loss_streak_pause_threshold: int = 3
+    loss_streak_pause_minutes: int = 60
+    volatility_pause_threshold: float = 0.35
+
+    # === PERFORMANCE GATING ===
+    min_strategy_win_rate: float = 0.45
+    min_strategy_pnl: float = 0.0
+
+    # === MARKET MAKING SETTINGS ===
+    enable_market_making: bool = True
+    min_spread_for_making: float = 0.01
+    max_inventory_risk: float = 0.15
+    max_inventory_skew: float = 500.0
+    order_refresh_minutes: int = 15
+    max_orders_per_market: int = 4
+    max_bid_ask_spread: float = 0.15
+    max_concurrent_markets: int = 10
+
+    # === MARKET SELECTION (ADVANCED) ===
+    min_volume_for_analysis: float = 200.0
+    min_volume_for_market_making: float = 500.0
+    min_price_movement: float = 0.02
+    min_confidence_long_term: float = 0.45
+
+    # === PORTFOLIO OPTIMIZATION SETTINGS ===
+    use_risk_parity: bool = True
+    rebalance_hours: int = 6
+    min_position_size: float = 5.0
+    max_opportunities_per_batch: int = 50
+
+    # === RISK MANAGEMENT LIMITS ===
+    max_volatility: float = 0.80
+    max_correlation: float = 0.95
+    max_drawdown: float = 0.50
+    max_sector_exposure: float = 0.90
+    min_trade_edge: float = 0.08
+    min_confidence_for_large_size: float = 0.65
+    max_reduction_per_cycle: float = 0.30
+    min_position_value: float = 5.0
+    rebalance_threshold: float = 0.10
+
+    # === PERFORMANCE TARGETS ===
+    target_sharpe: float = 0.3
+    target_return: float = 0.15
+
+    # === DYNAMIC EXIT STRATEGIES ===
+    use_dynamic_exits: bool = True
+    profit_threshold: float = 0.15
+    loss_threshold: float = 0.08
+    confidence_decay_threshold: float = 0.25
+    max_hold_time_hours: int = 72
+    volatility_adjustment: bool = True
+
+    # === POSITION LIMITS ===
+    warning_positions_threshold: int = 12
+    emergency_position_limit: int = 20
+    min_cash_reserve_pct: float = 0.5
+    max_position_size_pct_override: Optional[float] = None
+
+    # === CASH RESERVES ===
+    minimum_reserve_pct: float = 0.5
+    optimal_reserve_pct: float = 1.0
+    emergency_threshold_pct: float = 0.2
+    critical_threshold_pct: float = 0.05
+    max_single_trade_impact: float = 5.0
+    buffer_for_opportunities: float = 0.5
+
+    # === SYSTEM BEHAVIOR ===
+    beast_mode_enabled: bool = True
+    fallback_to_legacy: bool = True
+    paper_trading_mode: bool = False
+    log_level: str = "INFO"
+    performance_monitoring: bool = field(default_factory=lambda: _env_flag("ENABLE_PERFORMANCE_MONITORING", "true"))
+
+    # === ADVANCED FEATURES ===
+    cross_market_arbitrage: bool = False
+    sentiment_analysis: bool = True
+    options_strategies: bool = False
+    algorithmic_execution: bool = False
+
 
 @dataclass
 class LoggingConfig:
     """Logging configuration."""
-    log_level: str = "DEBUG"
+    log_level: str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "DEBUG"))
     log_format: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    log_file: str = "logs/trading_system.log"
-    enable_file_logging: bool = True
-    enable_console_logging: bool = True
+    log_file: str = field(default_factory=lambda: os.getenv("LOG_FILE", "logs/trading_system.log"))
+    enable_file_logging: bool = field(default_factory=lambda: _env_flag("ENABLE_FILE_LOGGING", "true"))
+    enable_console_logging: bool = field(default_factory=lambda: _env_flag("ENABLE_CONSOLE_LOGGING", "true"))
     max_log_file_size: int = 10 * 1024 * 1024  # 10MB
     backup_count: int = 5
 
@@ -139,9 +234,9 @@ class LoggingConfig:
 
 # === CAPITAL ALLOCATION ACROSS STRATEGIES ===
 # Allocate capital across different trading approaches
-market_making_allocation: float = 0.40  # 40% for market making (spread profits)
-directional_allocation: float = 0.50    # 50% for directional trading (AI predictions) 
-arbitrage_allocation: float = 0.10      # 10% for arbitrage opportunities
+market_making_allocation: float = 0.30  # 30% for market making (spread profits)
+directional_allocation: float = 0.40    # 40% for directional trading (AI predictions) 
+arbitrage_allocation: float = 0.00      # 0% for arbitrage opportunities (disabled by default)
 
   # === PORTFOLIO OPTIMIZATION SETTINGS ===
 # Kelly Criterion is now the PRIMARY position sizing method (moved to TradingConfig)
@@ -228,6 +323,67 @@ class Settings:
     # Advanced feature flags (referenced from module-level settings above)
     multi_model_ensemble: bool = True    # Use Grok-4 + Grok-3 consensus for high-stakes trades
     sentiment_analysis: bool = True      # News sentiment analysis enabled
+
+    def __post_init__(self) -> None:
+        """Sync module-level settings with TradingConfig to avoid drift."""
+        module_to_trading = [
+            "market_making_allocation",
+            "directional_allocation",
+            "arbitrage_allocation",
+            "use_risk_parity",
+            "rebalance_hours",
+            "min_position_size",
+            "max_opportunities_per_batch",
+            "max_volatility",
+            "max_correlation",
+            "max_drawdown",
+            "max_sector_exposure",
+            "target_sharpe",
+            "target_return",
+            "min_trade_edge",
+            "min_confidence_for_large_size",
+            "use_dynamic_exits",
+            "profit_threshold",
+            "loss_threshold",
+            "confidence_decay_threshold",
+            "max_hold_time_hours",
+            "volatility_adjustment",
+            "enable_market_making",
+            "min_spread_for_making",
+            "max_inventory_risk",
+            "order_refresh_minutes",
+            "max_orders_per_market",
+            "min_volume_for_analysis",
+            "min_volume_for_market_making",
+            "min_price_movement",
+            "max_bid_ask_spread",
+            "min_confidence_long_term",
+            "daily_ai_budget",
+            "max_ai_cost_per_decision",
+            "analysis_cooldown_hours",
+            "max_analyses_per_market_per_day",
+            "skip_news_for_low_volume",
+            "news_search_volume_threshold",
+            "beast_mode_enabled",
+            "fallback_to_legacy",
+            "live_trading_enabled",
+            "paper_trading_mode",
+            "log_level",
+            "performance_monitoring",
+            "cross_market_arbitrage",
+            "multi_model_ensemble",
+            "sentiment_analysis",
+            "options_strategies",
+            "algorithmic_execution",
+        ]
+
+        for name in module_to_trading:
+            if hasattr(self.trading, name):
+                globals()[name] = getattr(self.trading, name)
+                if hasattr(self, name):
+                    setattr(self, name, getattr(self.trading, name))
+            elif hasattr(self, name):
+                globals()[name] = getattr(self, name)
     
     def validate(self) -> bool:
         """Validate configuration settings."""
@@ -244,6 +400,12 @@ class Settings:
             raise ValueError("min_confidence_to_trade must be between 0 and 1")
         
         return True
+
+    def get_ai_daily_limit(self) -> float:
+        """Unified daily AI spend limit."""
+        if not self.trading.enable_daily_cost_limiting:
+            return self.trading.daily_ai_budget
+        return min(self.trading.daily_ai_budget, self.trading.daily_ai_cost_limit)
 
 
 # Global settings instance

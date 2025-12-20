@@ -5,7 +5,7 @@ A comprehensive Streamlit-based dashboard for monitoring and analyzing all aspec
 ## 🚀 Features
 
 ### 📈 Overview Page
-- **Real-time metrics**: Portfolio balance, total trades, P&L, active positions
+- **Auto-refresh metrics**: Portfolio balance, total trades, P&L, active positions
 - **Strategy performance summary**: Visual charts comparing all strategies
 - **Recent activity**: Latest positions and trades
 - **Quick insights**: At-a-glance system health
@@ -24,7 +24,7 @@ A comprehensive Streamlit-based dashboard for monitoring and analyzing all aspec
 - **Cost monitoring**: Track AI expenses over time
 
 ### 💼 Positions & Trades
-- **Active positions**: Real-time position tracking with filters
+- **Active positions**: Auto-refresh position tracking with filters
 - **Trade history**: Completed trades with performance metrics
 - **Position analytics**: Value distribution and risk analysis
 - **Strategy attribution**: See which strategy created each position
@@ -75,9 +75,9 @@ Use the sidebar to navigate between different sections:
 - **🔧 System Health**: System status and diagnostics
 
 ### Data Refresh
-- **Auto-refresh**: Data updates automatically (1-5 minute cache)
-- **Real-time**: Most metrics update in real-time
-- **Manual refresh**: Use browser refresh for instant updates
+- **Auto-refresh**: Data updates automatically via polling (30s)
+- **Near-real-time**: Metrics refresh on a timer, not WebSockets
+- **Manual refresh**: Use the refresh button for instant updates
 
 ## 🤖 LLM Query Tracking
 
@@ -145,7 +145,7 @@ Cost: $0.0023
 - **Concentration risk**: Too many positions in similar markets
 
 ### Risk Monitoring
-- **Real-time tracking**: Continuous risk assessment
+- **Auto-refresh tracking**: Continuous risk assessment
 - **Portfolio level**: Overall portfolio risk metrics
 - **Strategy level**: Risk by trading approach
 - **Position level**: Individual trade risk analysis

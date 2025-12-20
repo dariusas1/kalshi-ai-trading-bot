@@ -26,24 +26,25 @@ The authors are not responsible for any financial losses incurred through the us
 | **Quick Flip Scalping** | 30% | Rapid scalping of low-priced contracts (1¢-20¢) |
 
 ### Core Capabilities
-- **🧠 Multi-Agent AI Analysis**: Forecaster, Critic, and Trader agents for comprehensive market evaluation
-- **📊 Portfolio Optimization**: Kelly Criterion + Risk Parity allocation with dynamic rebalancing
+- **🧠 Role-Based AI Analysis**: Single prompt with Forecaster/Critic/Trader sections for market evaluation
+- **📊 Portfolio Optimization**: Kelly Criterion + risk parity allocation with dynamic rebalancing
 - **⚡ Live Trading**: Direct Kalshi API integration for real-time order execution
-- **📈 Real-time Dashboard**: Web-based monitoring with live P&L, positions, and performance metrics
+- **📈 Auto-Refresh Dashboard**: Streamlit monitoring with polling updates for P&L, positions, and metrics
 - **🔄 Position Sync**: Automatic synchronization with Kalshi positions on startup
 
 ### Advanced Strategies
 - **Volatility-Adjusted Sizing**: Dynamic position sizing based on market volatility
 - **Theta Decay Exploitation**: Profit from time decay on high-probability events
-- **ML Price Predictions**: Machine learning models for price movement forecasting
-- **Arbitrage Detection**: Spread arbitrage and correlated market opportunities
+- **ML Price Predictions**: Heuristic regression + feature extraction for price forecasting
+- **Arbitrage Detection**: Spread arbitrage with optional correlated market scans (disabled by default)
 - **Trailing Stop Losses**: Automatic profit protection with trailing stops
 
 ### AI Integration
 - **Primary Model**: Grok-4 (xAI) for market analysis and decision making
 - **Fallback Model**: Grok-3 for cost optimization
-- **Multi-Model Ensemble**: Consensus-based decisions for high-stakes trades
-- **Cost Controls**: Daily AI budget limits with automatic throttling
+- **OpenAI Fallback**: Optional backup if xAI calls fail
+- **Multi-Model Ensemble**: High-stakes consensus in legacy decision path
+- **Cost Controls**: Unified daily AI budget + hard limit with automatic throttling
 
 ---
 
@@ -78,8 +79,8 @@ The authors are not responsible for any financial losses incurred through the us
     ┌─────────────────────────────────────────────┐
     │  Kalshi API          │       xAI API        │
     │  • Order execution   │  • Grok-4 analysis   │
-    │  • Market data       │  • Price predictions │
-    │  • Position sync     │  • News sentiment    │
+    │  • Market data       │  • Heuristic signals │
+    │  • Position sync     │  • News search       │
     └─────────────────────────────────────────────┘
 ```
 
@@ -150,7 +151,7 @@ python beast_mode_bot.py --live
 # Paper trading mode (default)
 python beast_mode_bot.py
 
-# With real-time dashboard
+# With auto-refresh dashboard
 python beast_mode_bot.py --live --dashboard
 ```
 
@@ -166,7 +167,7 @@ python beast_mode_bot.py [OPTIONS]
 
 Options:
   --live           Enable live trading (real money)
-  --dashboard      Enable real-time web dashboard
+  --dashboard      Enable auto-refresh web dashboard
   --help           Show help message
 ```
 
@@ -182,7 +183,7 @@ Provides liquidity by placing limit orders on both YES and NO sides:
 
 ### 2. Directional Trading (40% allocation)
 AI-powered directional trades using portfolio optimization:
-- **Multi-agent analysis**: Forecaster estimates probability, Critic validates, Trader decides
+- **Role-based analysis**: Forecaster/Critic/Trader sections within a single prompt
 - **Kelly Criterion**: Optimal position sizing based on edge and confidence
 - **Risk parity**: Balanced risk allocation across positions
 
@@ -213,31 +214,38 @@ kelly_fraction = 0.55           # 55% Kelly for balanced aggression
 
 # Risk Management
 max_daily_loss_pct = 8.0       # Stop trading at 8% daily loss
-trailing_stop_distance = 0.05  # 5% trailing stop
+trailing_stop_distance_pct = 0.05  # 5% trailing stop
 
 # AI Configuration
 primary_model = "grok-4"       # Primary AI model
-daily_ai_budget = 12.0         # Daily AI spending limit ($)
-min_confidence = 0.65          # Minimum confidence to trade
+daily_ai_budget = 12.0         # Daily AI soft budget ($)
+daily_ai_cost_limit = 20.0     # Daily AI hard cap ($)
+min_confidence_to_trade = 0.65 # Minimum confidence to trade
 
 # Market Filtering
 min_volume = 750               # Minimum volume threshold
-max_time_to_expiry = 14 days   # Maximum expiry window
+max_time_to_expiry_days = 14   # Maximum expiry window
 ```
+
+### Feature Flags
+- `sentiment_analysis`: Toggles optional news search context (not a full sentiment model)
+- `options_strategies`: Reserved for future options-style strategies (logs a warning if enabled)
+- `algorithmic_execution`: Enables IOC/market order selection logic for entries
 
 ### Strategy Allocations
 ```python
 market_making_allocation = 0.30   # 30% for market making
 directional_allocation = 0.40    # 40% for directional trades
 quick_flip_allocation = 0.30     # 30% for scalping
+arbitrage_allocation = 0.00      # 0% by default (enable explicitly)
 ```
 
 ---
 
 ## 📊 Monitoring & Analytics
 
-### Real-time Dashboard
-Access the web dashboard at `http://localhost:8050`:
+### Auto-Refresh Dashboard
+Access the web dashboard at `http://localhost:8501`:
 - Live P&L tracking
 - Active positions overview
 - Strategy performance breakdown
@@ -254,6 +262,11 @@ python quick_performance_analysis.py
 
 # View strategy-specific performance
 python view_strategy_performance.py
+```
+
+Optional: start the performance system manager (scheduler + alerts):
+```bash
+ENABLE_PERFORMANCE_SYSTEM_MANAGER=true python performance_system_manager.py --start
 ```
 
 ### Position Management
@@ -275,7 +288,7 @@ python portfolio_health_check.py
 ```
 kalshi-ai-trading-bot/
 ├── beast_mode_bot.py              # Main entry point
-├── beast_mode_dashboard.py        # Real-time dashboard
+├── beast_mode_dashboard.py        # Auto-refresh dashboard
 ├── trading_dashboard.py           # Detailed trading dashboard
 ├── src/
 │   ├── clients/
@@ -374,3 +387,12 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ---
 
 **Disclaimer**: This software is for educational and research purposes. Trading involves risk, and you should only trade with capital you can afford to lose. The authors are not responsible for any financial losses incurred through the use of this software.
+
+# 1. Activate your virtual environment
+source venv/bin/activate
+
+# 2. Fix the "permission denied" error for the startup script
+chmod +x start_railway.sh
+
+# 3. Launch the entire platform (Bot + Dashboard + Analytics)
+./start_railway.sh

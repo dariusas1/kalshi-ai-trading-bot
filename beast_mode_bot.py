@@ -3,9 +3,10 @@
 Beast Mode Trading Bot 🚀
 
 Main entry point for the Unified Advanced Trading System that orchestrates:
-- Market Making Strategy (40% allocation)
-- Directional Trading with Portfolio Optimization (50% allocation) 
-- Arbitrage Detection (10% allocation)
+- Market Making Strategy (30% allocation)
+- Directional Trading with Portfolio Optimization (40% allocation) 
+- Quick Flip Scalping (30% allocation)
+- Arbitrage Detection (0% by default)
 
 Features:
 - No time restrictions (trade any deadline)
@@ -24,6 +25,7 @@ import asyncio
 import argparse
 import time
 import signal
+import os
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -31,6 +33,7 @@ from src.jobs.trade import run_trading_job
 from src.jobs.ingest import run_ingestion
 from src.jobs.track import run_tracking
 from src.jobs.evaluate import run_evaluation
+from src.jobs.performance_scheduler import start_performance_scheduler, stop_performance_scheduler
 from src.utils.logging_setup import setup_logging, get_trading_logger
 from src.utils.database import DatabaseManager
 from src.clients.kalshi_client import KalshiClient
@@ -90,6 +93,7 @@ class BeastModeBot:
             self.logger.info("🚀 BEAST MODE TRADING BOT STARTED")
             self.logger.info(f"📊 Trading Mode: {'LIVE' if self.live_mode else 'PAPER'}")
             self.logger.info(f"💰 Daily AI Budget: ${settings.trading.daily_ai_budget}")
+            self.logger.info(f"🧮 Daily AI Spend Limit: ${settings.get_ai_daily_limit()}")
             self.logger.info(f"⚡ Features: Market Making + Portfolio Optimization + Dynamic Exits")
             
             # 🚨 CRITICAL FIX: Initialize database FIRST and wait for completion
@@ -117,14 +121,23 @@ class BeastModeBot:
             # Wait for initial market data ingestion
             await asyncio.sleep(10)
             
+            performance_scheduler = None
+            performance_manager_enabled = os.getenv("ENABLE_PERFORMANCE_SYSTEM_MANAGER", "false").strip().lower() in ("1", "true", "yes", "on")
+            if settings.trading.performance_monitoring and not performance_manager_enabled:
+                performance_scheduler = start_performance_scheduler()
+
             # Run remaining background tasks
             self.logger.info("🚀 Starting trading and monitoring tasks...")
             tasks = [
                 ingestion_task,  # Already started
                 asyncio.create_task(self._run_trading_cycles(db_manager, kalshi_client, xai_client)),
                 asyncio.create_task(self._run_position_tracking(db_manager, kalshi_client)),
-                asyncio.create_task(self._run_performance_evaluation(db_manager))
+                asyncio.create_task(self._run_reconciliation(db_manager))
             ]
+            if settings.trading.performance_monitoring:
+                tasks.append(asyncio.create_task(self._run_performance_evaluation(db_manager)))
+            else:
+                self.logger.info("Performance monitoring disabled; skipping evaluation task")
             
             # Setup shutdown handler
             def signal_handler():
@@ -132,6 +145,8 @@ class BeastModeBot:
                 self.shutdown_event.set()
                 for task in tasks:
                     task.cancel()
+                if performance_scheduler:
+                    stop_performance_scheduler()
             
             # Handle Ctrl+C gracefully
             for sig in [signal.SIGINT, signal.SIGTERM]:
@@ -142,6 +157,8 @@ class BeastModeBot:
             
             await xai_client.close()
             await kalshi_client.close()
+            if performance_scheduler:
+                stop_performance_scheduler()
             
             self.logger.info("🏁 Beast Mode Bot shut down gracefully")
             
@@ -175,7 +192,8 @@ class BeastModeBot:
                 market_queue = asyncio.Queue()
                 # ✅ FIXED: Pass the shared database manager
                 await run_ingestion(db_manager, market_queue)
-                await asyncio.sleep(300)  # Run every 5 minutes (much slower to prevent 429s)
+                sleep_seconds = max(60, settings.trading.market_scan_interval)
+                await asyncio.sleep(sleep_seconds)
             except Exception as e:
                 self.logger.error(f"Error in market ingestion: {e}")
                 await asyncio.sleep(60)
@@ -193,10 +211,80 @@ class BeastModeBot:
                     continue
                 
                 cycle_count += 1
-                self.logger.info(f"🔄 Starting Beast Mode Trading Cycle #{cycle_count}")
                 
+                # Check Kill Switch
+                kill_switch = await db_manager.get_setting("kill_switch", "off")
+                if kill_switch == "on":
+                    self.logger.warning(f"🛑 Kill switch is ON. Skipping trading cycle #{cycle_count}")
+                    await asyncio.sleep(60)
+                    continue
+
+                # Daily loss guardrail
+                try:
+                    pnl_today = await db_manager.get_pnl_by_period("today")
+                    total_pnl = pnl_today.get("total_pnl", 0.0) if isinstance(pnl_today, dict) else 0.0
+                    balance_response = await kalshi_client.get_balance()
+                    total_capital = balance_response.get("balance", 0) / 100
+                    loss_limit = settings.trading.max_daily_loss_pct / 100 * max(total_capital, 1)
+                    if total_pnl < 0 and abs(total_pnl) >= loss_limit:
+                        self.logger.warning(
+                            f"🛑 Daily loss limit reached: ${total_pnl:.2f} (limit {settings.trading.max_daily_loss_pct:.1f}%)"
+                        )
+                        await asyncio.sleep(60)
+                        continue
+                except Exception as e:
+                    self.logger.warning(f"Daily loss check failed: {e}")
+                
+                # Update settings from database dynamically
+                await self._update_dynamic_settings(db_manager)
+
+                # Intraday risk throttles
+                try:
+                    streaks = await db_manager.get_trading_streaks()
+                    if (streaks.get("streak_type") == "loss" and
+                            streaks.get("current_streak", 0) >= settings.trading.loss_streak_pause_threshold):
+                        pause_minutes = settings.trading.loss_streak_pause_minutes
+                        self.logger.warning(
+                            f"🛑 Loss streak throttle: {streaks.get('current_streak')} losses. "
+                            f"Pausing {pause_minutes} minutes."
+                        )
+                        await asyncio.sleep(pause_minutes * 60)
+                        continue
+                except Exception as e:
+                    self.logger.warning(f"Loss streak check failed: {e}")
+
+                # Trade frequency guardrail
+                try:
+                    if settings.trading.max_trades_per_hour:
+                        recent_trades = await db_manager.get_recent_trades(limit=200)
+                        one_hour_ago = datetime.now() - timedelta(hours=1)
+                        trades_last_hour = 0
+                        for trade in recent_trades:
+                            ts = trade.get("exit_timestamp") or trade.get("timestamp")
+                            if isinstance(ts, str):
+                                try:
+                                    ts_dt = datetime.fromisoformat(ts)
+                                except ValueError:
+                                    continue
+                            else:
+                                ts_dt = ts
+                            if ts_dt and ts_dt >= one_hour_ago:
+                                trades_last_hour += 1
+
+                        if trades_last_hour >= settings.trading.max_trades_per_hour:
+                            self.logger.warning(
+                                f"⏳ Max trades/hour reached ({trades_last_hour}/{settings.trading.max_trades_per_hour}), pausing cycle"
+                            )
+                            await asyncio.sleep(60)
+                            continue
+                except Exception as e:
+                    self.logger.warning(f"Trade frequency check failed: {e}")
+
+                self.logger.info(f"🔄 Starting Beast Mode Trading Cycle #{cycle_count}")
+
                 # Run the Beast Mode unified trading system
                 results = await run_trading_job()
+
                 
                 if results and results.total_positions > 0:
                     self.logger.info(
@@ -207,13 +295,57 @@ class BeastModeBot:
                     )
                 else:
                     self.logger.info(f"📊 Cycle #{cycle_count} Complete - No new positions created")
-                
-                # Wait for next cycle (60 seconds)
-                await asyncio.sleep(60)
+
+                # Volatility throttle
+                if results and results.portfolio_volatility > settings.trading.volatility_pause_threshold:
+                    self.logger.warning(
+                        f"🛑 Volatility throttle: {results.portfolio_volatility:.2%} > "
+                        f"{settings.trading.volatility_pause_threshold:.2%}. Pausing 10 minutes."
+                    )
+                    await asyncio.sleep(600)
+
+                # Wait for next cycle
+                cycle_sleep = max(
+                    settings.trading.scan_interval_seconds,
+                    settings.trading.run_interval_minutes * 60
+                )
+                await asyncio.sleep(cycle_sleep)
                 
             except Exception as e:
                 self.logger.error(f"Error in trading cycle #{cycle_count}: {e}")
                 await asyncio.sleep(60)
+
+    async def _update_dynamic_settings(self, db_manager: DatabaseManager):
+        """Update trading parameters dynamically from the database."""
+        try:
+            # 1. Confidence threshold
+            min_conf = await db_manager.get_setting("min_confidence")
+            if min_conf:
+                settings.trading.min_confidence_to_trade = float(min_conf)
+            
+            # 2. Risk per trade
+            max_risk = await db_manager.get_setting("max_risk_per_trade")
+            if max_risk:
+                settings.trading.max_position_size_pct = float(max_risk)
+                
+            # 3. Strategy allocations
+            mm_w = await db_manager.get_setting("weight_market_making")
+            dir_w = await db_manager.get_setting("weight_directional")
+            qf_w = await db_manager.get_setting("weight_quick_flip")
+            
+            if mm_w and dir_w and qf_w:
+                # Update settings (assumes these attributes exist in settings.trading)
+                settings.trading.market_making_allocation = float(mm_w) / 100.0
+                settings.trading.directional_allocation = float(dir_w) / 100.0
+                settings.trading.quick_flip_allocation = float(qf_w) / 100.0
+                
+            # 4. Blacklist
+            blacklist = await db_manager.get_setting("category_blacklist")
+            if blacklist:
+                settings.trading.category_blacklist = [c.strip().lower() for c in blacklist.split(",")]
+            
+        except Exception as e:
+            self.logger.error(f"Error updating dynamic settings: {e}")
 
     async def _check_daily_ai_limits(self, xai_client: XAIClient) -> bool:
         """
@@ -282,7 +414,7 @@ class BeastModeBot:
                 
                 # ✅ FIXED: Pass the shared database manager
                 await run_tracking(db_manager)
-                await asyncio.sleep(120)  # Check positions every 2 minutes (slower to reduce API load)
+                await asyncio.sleep(max(10, settings.trading.position_check_interval))
             except Exception as e:
                 self.logger.error(f"Error in position tracking: {e}")
                 await asyncio.sleep(30)
@@ -296,6 +428,18 @@ class BeastModeBot:
             except Exception as e:
                 self.logger.error(f"Error in performance evaluation: {e}")
                 await asyncio.sleep(300)
+
+    async def _run_reconciliation(self, db_manager: DatabaseManager):
+        """Background task for daily reconciliation with Kalshi."""
+        from src.jobs.reconcile import run_reconciliation
+
+        while not self.shutdown_event.is_set():
+            try:
+                await run_reconciliation(db_manager)
+                await asyncio.sleep(24 * 60 * 60)  # Run daily
+            except Exception as e:
+                self.logger.error(f"Error in reconciliation: {e}")
+                await asyncio.sleep(60 * 60)
 
     async def run(self):
         """Main entry point for Beast Mode Bot."""
