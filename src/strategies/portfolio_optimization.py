@@ -1051,7 +1051,8 @@ async def create_market_opportunities_from_markets(
     markets = filtered_markets
     
     # Limit markets to prevent excessive AI costs and focus on best opportunities
-    max_markets_to_analyze = max(5, settings.trading.num_processor_workers * 2)
+    # LIMIT: Analyze reasonable number of markets for AI processing
+    max_markets_to_analyze = max(10, settings.trading.num_processor_workers * 5)  # 10 markets (conservative)
     if len(markets) > max_markets_to_analyze:
         # Sort by volume and take top markets
         markets = sorted(markets, key=lambda m: m.volume, reverse=True)[:max_markets_to_analyze]
@@ -1196,12 +1197,12 @@ async def _evaluate_immediate_trade(
             }
         )
         
-        # Additional criteria for immediate execution - MORE AGGRESSIVE
+        # Additional criteria for immediate execution - CONSERVATIVE
         strong_opportunity = (
             should_trade and
-            edge_result.edge_percentage >= 0.10 and  # DECREASED: 10% edge for immediate execution (was 18%)
-            opportunity.confidence >= 0.60 and       # DECREASED: 60% confidence (was 75%)
-            opportunity.expected_return >= 0.05      # DECREASED: 5% expected return (was 8%)
+            edge_result.edge_percentage >= 0.10 and  # RESTORED: 10% edge requirement
+            opportunity.confidence >= 0.60 and       # RESTORED: 60% confidence
+            opportunity.expected_return >= 0.05      # RESTORED: 5% expected return
         )
         
         if not strong_opportunity:

@@ -96,10 +96,10 @@ class TradingConfig:
     max_analysis_cost_per_decision: float = 0.15  # INCREASED: Allow higher cost per decision (was 0.10, now 0.15)
     min_confidence_threshold: float = 0.60  # DECREASED: Lower confidence threshold (was 0.55, now 0.45)
 
-    # Cost control and market analysis frequency - OPTIMIZED FOR MORE OPPORTUNITIES
-    daily_ai_budget: float = 12.0  # INCREASED: $12.00 daily AI budget (was $4.00)
-    max_ai_cost_per_decision: float = 0.08  # $0.08 max per-decision cost
-    analysis_cooldown_hours: int = 2  # DECREASED: 2 hour cooldown (was 4 hours)
+    # Cost control and market analysis frequency - CONSERVATIVE SETTINGS
+    daily_ai_budget: float = 12.0  # DEFAULT: $12.00 daily AI budget
+    max_ai_cost_per_decision: float = 0.08  # DEFAULT: $0.08 max per-decision cost
+    analysis_cooldown_hours: int = 2  # DEFAULT: 2 hour cooldown
     max_analyses_per_market_per_day: int = 3  # INCREASED: More analyses per day (was 2, now 4)
     
     # Daily AI spending limits - SAFETY CONTROLS
@@ -136,8 +136,8 @@ class TradingConfig:
     market_order_price_buffer_cents: int = 2  # Cap market orders at ask + buffer
 
     # === INTRADAY RISK THROTTLES ===
-    loss_streak_pause_threshold: int = 3
-    loss_streak_pause_minutes: int = 60
+    loss_streak_pause_threshold: int = 8  # INCREASED: Allow more losses before pausing (was 3)
+    loss_streak_pause_minutes: int = 30    # REDUCED: Shorter pause duration (was 60)
     volatility_pause_threshold: float = 0.35
 
     # === PERFORMANCE GATING ===
@@ -216,6 +216,48 @@ class TradingConfig:
     options_strategies: bool = False
     algorithmic_execution: bool = False
 
+    # === ENSEMBLE CONFIGURATION ===
+    # Advanced ensemble settings for multi-model AI integration
+    enable_advanced_ensemble: bool = True               # Enable advanced ensemble engine
+    ensemble_consensus_threshold: float = 0.7           # Minimum consensus for ensemble agreement
+    ensemble_disagreement_threshold: float = 0.4         # Threshold for detecting model disagreement
+    ensemble_uncertainty_threshold: float = 0.6         # Uncertainty threshold for risk adjustment
+    ensemble_enable_weighted_voting: bool = True        # Use performance-based weighted voting
+    ensemble_enable_confidence_calibration: bool = True # Calibrate model confidence levels
+    ensemble_performance_weight_factor: float = 2.0     # Weight factor for performance in voting
+    ensemble_max_models_per_decision: int = 3           # Maximum models to consult per decision
+    ensemble_timeout_seconds: int = 30                 # Timeout for ensemble decision making
+
+    # Cascading ensemble thresholds based on trade value
+    ensemble_cascading_low_value_threshold: float = 10.0  # Trade value for single model
+    ensemble_cascading_medium_value_threshold: float = 50.0  # Trade value for full ensemble
+    ensemble_cascading_high_value_threshold: float = 100.0   # Trade value for enhanced consensus
+
+    # Ensemble model configuration
+    ensemble_primary_models: List[str] = field(default_factory=lambda: ["grok-4"])
+    ensemble_fallback_models: List[str] = field(default_factory=lambda: ["grok-3"])
+    ensemble_backup_providers: List[str] = field(default_factory=lambda: ["openai-gpt-4"])
+    ensemble_enable_local_models: bool = False          # Enable local model fallbacks
+
+    # Performance and cost optimization
+    ensemble_cache_decisions: bool = True               # Cache ensemble decisions for similar markets
+    ensemble_cache_similarity_threshold: float = 0.8     # Similarity threshold for cache reuse
+    ensemble_cache_ttl_hours: int = 2                   # Cache time-to-live in hours
+    ensemble_cost_optimization_enabled: bool = True     # Enable cost-aware model selection
+    ensemble_budget_aware_selection: bool = True        # Use budget constraints in model selection
+
+    # Health monitoring and failover
+    ensemble_health_check_interval_seconds: int = 300    # Health check frequency (5 minutes)
+    ensemble_max_consecutive_failures: int = 3           # Max failures before model deselection
+    ensemble_auto_recovery_enabled: bool = True          # Enable automatic model recovery
+    ensemble_emergency_mode_enabled: bool = True         # Enable emergency trading mode
+
+    # Monitoring and analytics
+    ensemble_enable_performance_tracking: bool = True   # Track ensemble performance metrics
+    ensemble_enable_disagreement_logging: bool = True    # Log model disagreements for analysis
+    ensemble_enable_uncertainty_quantification: bool = True # Quantify decision uncertainty
+    ensemble_enable_contribution_analysis: bool = True   # Track individual model contributions
+
 
 @dataclass
 class LoggingConfig:
@@ -288,10 +330,10 @@ min_confidence_long_term: float = 0.45  # DECREASED: Lower confidence for distan
 
 # === COST OPTIMIZATION (MORE GENEROUS) ===
 # Enhanced cost controls for the beast mode system
-daily_ai_budget: float = 15.0           # INCREASED: Higher budget for more opportunities (was 10.0, now 15.0)
-max_ai_cost_per_decision: float = 0.12  # INCREASED: Higher per-decision limit (was 0.08, now 0.12)
-analysis_cooldown_hours: int = 2        # DECREASED: Much shorter cooldown (was 4, now 2)
-max_analyses_per_market_per_day: int = 6  # INCREASED: More analyses per day (was 3, now 6)
+daily_ai_budget: float = 25.0           # INCREASED: Much higher budget for more opportunities (was 15.0, now 25.0)
+max_ai_cost_per_decision: float = 0.15  # INCREASED: Higher per-decision limit (was 0.12, now 0.15)
+analysis_cooldown_hours: int = 1        # DECREASED: Much shorter cooldown (was 2, now 1)
+max_analyses_per_market_per_day: int = 10 # INCREASED: More analyses per day (was 6, now 10)
 skip_news_for_low_volume: bool = True   # Skip expensive searches for low volume
 news_search_volume_threshold: float = 1000.0  # News threshold
 

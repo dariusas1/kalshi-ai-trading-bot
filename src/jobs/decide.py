@@ -261,22 +261,60 @@ async def make_decision_for_market(
         # Use multi-model ensemble for high-stakes trades if enabled
         # Define high-stakes as potential investment > $50 (approx 5000 cents)
         max_investment_possible = (available_balance * settings.trading.max_position_size_pct) / 100
-        is_high_stakes = max_investment_possible >= 50.0
-        
+        is_high_stakes = max_investment_possible >= settings.trading.ensemble_cascading_medium_value_threshold
+
+        # Enhanced ensemble decision logic with confidence and uncertainty handling
         if settings.multi_model_ensemble and is_high_stakes:
-            logger.info(f"Using multi-model ensemble for high-stakes market (max potential: ${max_investment_possible:.2f})")
-            decision = await xai_client.get_ensemble_decision(
-                market_data=market_data,
-                portfolio_data=portfolio_data,
-                news_summary=news_summary,
-                min_consensus_confidence=0.65  # Slightly stricter for high-stakes
-            )
+            logger.info(f"Using enhanced multi-model ensemble for high-stakes market (max potential: ${max_investment_possible:.2f})")
+
+            # Try advanced ensemble first, fall back to basic ensemble if needed
+            try:
+                decision = await xai_client.get_advanced_ensemble_decision(
+                    market_data=market_data,
+                    portfolio_data=portfolio_data,
+                    news_summary=news_summary,
+                    trade_value=max_investment_possible,
+                    strategy="cascading"  # Use cascading strategy for high-stakes
+                )
+
+                # If advanced ensemble failed, try basic ensemble
+                if decision is None:
+                    logger.info(f"Advanced ensemble returned None, trying basic ensemble")
+                    decision = await xai_client.get_ensemble_decision(
+                        market_data=market_data,
+                        portfolio_data=portfolio_data,
+                        news_summary=news_summary,
+                        min_consensus_confidence=0.65  # Slightly stricter for high-stakes
+                    )
+
+            except Exception as e:
+                logger.warning(f"Advanced ensemble failed: {e}, falling back to basic ensemble")
+                decision = await xai_client.get_ensemble_decision(
+                    market_data=market_data,
+                    portfolio_data=portfolio_data,
+                    news_summary=news_summary,
+                    min_consensus_confidence=0.65
+                )
+
         else:
-            decision = await xai_client.get_trading_decision(
-                market_data=market_data,
-                portfolio_data=portfolio_data,
-                news_summary=news_summary,
-            )
+            # For low-value trades, use single model or basic ensemble if available
+            if (settings.multi_model_ensemble and
+                max_investment_possible >= settings.trading.ensemble_cascading_low_value_threshold):
+                # Use basic ensemble for medium-value trades
+                logger.info(f"Using basic ensemble for medium-value trade (max potential: ${max_investment_possible:.2f})")
+                decision = await xai_client.get_ensemble_decision(
+                    market_data=market_data,
+                    portfolio_data=portfolio_data,
+                    news_summary=news_summary,
+                    min_consensus_confidence=0.60  # Standard confidence threshold
+                )
+            else:
+                # Use single model for low-value trades
+                decision = await xai_client.get_trading_decision(
+                    market_data=market_data,
+                    portfolio_data=portfolio_data,
+                    news_summary=news_summary,
+                )
 
         # Estimate decision cost (this should come from the XAI client in the future)
         estimated_decision_cost = 0.015  # Rough estimate
@@ -292,17 +330,47 @@ async def make_decision_for_market(
         decision_action = decision.action
         confidence = decision.confidence
 
+        # Extract ensemble uncertainty information if available
+        ensemble_uncertainty = None
+        ensemble_disagreement = None
+        if hasattr(decision, 'reasoning') and decision.reasoning:
+            # Check if this is an advanced ensemble decision
+            if "[ADVANCED ENSEMBLE]" in decision.reasoning:
+                # Extract uncertainty from reasoning
+                import re
+                uncertainty_match = re.search(r'Uncertainty: ([\d.]+)', decision.reasoning)
+                if uncertainty_match:
+                    ensemble_uncertainty = float(uncertainty_match.group(1))
+                    logger.info(f"Ensemble uncertainty detected: {ensemble_uncertainty:.2f}")
+
+            elif "[MULTI-AGENT ENSEMBLE]" in decision.reasoning:
+                # Basic ensemble - assume low uncertainty due to consensus requirement
+                ensemble_uncertainty = 0.2
+                logger.info("Basic ensemble consensus detected, assuming low uncertainty")
+
+        # Adjust confidence based on ensemble uncertainty if available
+        adjusted_confidence = confidence
+        if ensemble_uncertainty is not None:
+            # Reduce confidence when uncertainty is high
+            uncertainty_penalty = ensemble_uncertainty * 0.3  # Max 30% reduction
+            adjusted_confidence = max(confidence - uncertainty_penalty, 0.1)
+            logger.info(f"Adjusted confidence from {confidence:.2f} to {adjusted_confidence:.2f} based on uncertainty {ensemble_uncertainty:.2f}")
+
         logger.info(
             f"Generated decision for {market.market_id}: {decision.action} {decision.side} "
-            f"at {decision.limit_price}c with confidence {decision.confidence} (cost: ${total_analysis_cost:.3f})"
+            f"at {decision.limit_price}c with confidence {confidence} (adjusted: {adjusted_confidence:.2f}, cost: ${total_analysis_cost:.3f})"
         )
 
-        # Record the analysis
+        # Record the analysis with ensemble metadata
+        analysis_metadata = {
+            "ensemble_uncertainty": ensemble_uncertainty,
+            "adjusted_confidence": adjusted_confidence
+        }
         await db_manager.record_market_analysis(
-            market.market_id, decision_action, confidence, total_analysis_cost
+            market.market_id, decision_action, adjusted_confidence, total_analysis_cost, metadata=analysis_metadata
         )
 
-        if decision.action == "BUY" and decision.confidence >= settings.trading.min_confidence_to_trade:
+        if decision.action == "BUY" and adjusted_confidence >= settings.trading.min_confidence_to_trade:
             price = market.yes_price if decision.side == "YES" else market.no_price
             
             # Apply Grok4 edge filtering - 10% minimum edge requirement
@@ -312,11 +380,11 @@ async def make_decision_for_market(
             market_prob = market.yes_price if decision.side == "YES" else market.no_price
             ai_prob = decision.confidence
             
-            # Check edge filter
+            # Check edge filter with adjusted confidence
             should_trade, trade_reason, edge_result = EdgeFilter.should_trade_market(
                 ai_probability=ai_prob,
                 market_probability=market_prob,
-                confidence=decision.confidence,
+                confidence=adjusted_confidence,  # Use adjusted confidence
                 additional_filters={
                     'volume': market.volume,
                     'min_volume': settings.trading.min_volume,
@@ -328,7 +396,7 @@ async def make_decision_for_market(
             if not should_trade:
                 logger.info(f"❌ EDGE FILTER REJECTED: {market.market_id} - {trade_reason}")
                 await db_manager.record_market_analysis(
-                    market.market_id, "EDGE_FILTERED", decision.confidence, total_analysis_cost, trade_reason
+                    market.market_id, "EDGE_FILTERED", adjusted_confidence, total_analysis_cost, trade_reason
                 )
                 return None
                 

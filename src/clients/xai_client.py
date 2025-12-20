@@ -468,89 +468,339 @@ Provide a brief, factual summary under {max_length//2} words. If no current info
         min_consensus_confidence: float = 0.6
     ) -> Optional[TradingDecision]:
         """
-        Get trading decision using multi-model ensemble (Grok-4 + Grok-3).
-        
-        Both models must agree on action and side with sufficient confidence
-        for the trade to be approved. Used for high-stakes trades.
-        
+        Get trading decision using multi-model ensemble with enhanced engine.
+
+        Attempts to use the advanced ensemble engine first, falls back to
+        basic consensus (Grok-4 + Grok-3) if advanced engine unavailable.
+
         Args:
             market_data: Market information
             portfolio_data: Portfolio state
             news_summary: Optional news context
             min_consensus_confidence: Minimum confidence required from both models
-            
+
         Returns:
             TradingDecision if models reach consensus, None otherwise.
         """
         from src.config import settings as config_settings
-        
+
         if not config_settings.multi_model_ensemble:
             # Feature disabled - use regular single-model decision
             return await self.get_trading_decision(market_data, portfolio_data, news_summary)
-        
+
         self.logger.info("🔄 Using multi-model ensemble for decision")
-        
+
         try:
-            # Query primary model (Grok-4)
-            primary_decision = await self._get_trading_decision_with_prompt(
-                market_data, portfolio_data, news_summary, ml_prediction=None, use_simplified=False
-            )
-            
-            if not primary_decision:
-                self.logger.warning("Primary model (Grok-4) returned no decision")
-                return None
-            
-            # Query fallback model (Grok-3) with same prompt
-            # Temporarily switch model
-            original_model = self.primary_model
-            self.primary_model = self.fallback_model
-            
-            try:
-                secondary_decision = await self._get_trading_decision_with_prompt(
-                    market_data, portfolio_data, news_summary, ml_prediction=None, use_simplified=True
-                )
-            finally:
-                self.primary_model = original_model  # Restore
-            
-            if not secondary_decision:
-                self.logger.warning("Secondary model (Grok-3) returned no decision")
-                return None
-            
-            # Check consensus
-            action_match = primary_decision.action == secondary_decision.action
-            side_match = primary_decision.side == secondary_decision.side
-            
-            primary_confident = primary_decision.confidence >= min_consensus_confidence
-            secondary_confident = secondary_decision.confidence >= min_consensus_confidence
-            
-            if action_match and side_match and primary_confident and secondary_confident:
-                # Consensus reached - use average confidence
-                avg_confidence = (primary_decision.confidence + secondary_decision.confidence) / 2
-                
-                self.logger.info(
-                    f"✅ [ENSEMBLE CONSENSUS] Action: {primary_decision.action}, Side: {primary_decision.side} "
-                    f"(Grok-4: {primary_decision.confidence:.1%}, Grok-3: {secondary_decision.confidence:.1%})"
-                )
-                
-                return TradingDecision(
-                    action=primary_decision.action,
-                    side=primary_decision.side,
-                    confidence=avg_confidence,
-                    limit_price=primary_decision.limit_price,
-                    reasoning=f"[MULTI-AGENT ENSEMBLE] Grok-4 + Grok-3 consensus. {primary_decision.reasoning}"
+            # First try to use advanced ensemble engine
+            if await self._try_initialize_ensemble_engine():
+                return await self._use_advanced_ensemble_decision(
+                    market_data, portfolio_data, news_summary
                 )
             else:
-                self.logger.info(
-                    f"⚠️ [ENSEMBLE DISAGREEMENT] Decision blocked due to lack of consensus. "
-                    f"Grok-4: {primary_decision.action}/{primary_decision.side} ({primary_decision.confidence:.1%}), "
-                    f"Grok-3: {secondary_decision.action}/{secondary_decision.side} ({secondary_decision.confidence:.1%})"
+                # Fall back to basic consensus
+                return await self._use_basic_ensemble_decision(
+                    market_data, portfolio_data, news_summary, min_consensus_confidence
                 )
-                return None
-                
+
         except Exception as e:
             self.logger.error(f"Error in ensemble decision: {e}")
             # Fall back to single-model decision
             return await self.get_trading_decision(market_data, portfolio_data, news_summary)
+
+    async def _try_initialize_ensemble_engine(self) -> bool:
+        """
+        Try to initialize the advanced ensemble engine.
+
+        Returns:
+            True if initialization successful, False otherwise.
+        """
+        try:
+            if not hasattr(self, '_ensemble_engine_initialized'):
+                await self._initialize_ensemble_engine()
+            return self._ensemble_engine_initialized
+        except Exception as e:
+            self.logger.warning(f"Failed to initialize ensemble engine: {e}")
+            return False
+
+    async def _use_advanced_ensemble_decision(
+        self,
+        market_data: Dict,
+        portfolio_data: Dict,
+        news_summary: str = ""
+    ) -> Optional[TradingDecision]:
+        """
+        Use the advanced ensemble engine for decision making.
+
+        Args:
+            market_data: Market information
+            portfolio_data: Portfolio state
+            news_summary: Optional news context
+
+        Returns:
+            TradingDecision from advanced ensemble, None if no consensus
+        """
+        try:
+            self.logger.info("🚀 Using advanced ensemble engine")
+
+            # Calculate trade value from portfolio data
+            available_balance = portfolio_data.get("balance", portfolio_data.get("available_balance", 1000))
+            trade_value = (available_balance * settings.trading.max_position_size_pct) / 100
+
+            # Convert market data for ensemble engine
+            enhanced_market_data = {
+                **market_data,
+                "news_summary": news_summary,
+                "trade_value": trade_value,
+                "timestamp": datetime.now()
+            }
+
+            # Get ensemble decision
+            ensemble_result = await self._ensemble_engine.get_ensemble_decision(
+                enhanced_market_data,
+                portfolio_data,
+                trade_value,
+                market_data.get("category", "unknown"),
+                strategy=None  # Let ensemble engine decide optimal strategy
+            )
+
+            if ensemble_result.final_decision:
+                self.logger.info(
+                    f"✅ [ADVANCED ENSEMBLE] {ensemble_result.final_decision.action} "
+                    f"(confidence: {ensemble_result.final_decision.confidence:.1%}, "
+                    f"strategy: {ensemble_result.ensemble_strategy.value})"
+                )
+
+                # Add ensemble metadata to reasoning
+                enhanced_reasoning = (
+                    f"[ADVANCED ENSEMBLE] {ensemble_result.final_decision.reasoning} | "
+                    f"Strategy: {ensemble_result.ensemble_strategy.value} | "
+                    f"Models: {', '.join(ensemble_result.models_consulted)} | "
+                    f"Uncertainty: {ensemble_result.uncertainty_score:.2f}"
+                )
+
+                return TradingDecision(
+                    action=ensemble_result.final_decision.action,
+                    side=ensemble_result.final_decision.side,
+                    confidence=ensemble_result.final_decision.confidence,
+                    limit_price=ensemble_result.final_decision.limit_price,
+                    reasoning=enhanced_reasoning
+                )
+            else:
+                self.logger.info(
+                    f"⚠️ [ADVANCED ENSEMBLE] No decision - "
+                    f"Disagreement: {ensemble_result.disagreement_detected}, "
+                    f"Uncertainty: {ensemble_result.uncertainty_score:.2f}"
+                )
+                return None
+
+        except Exception as e:
+            self.logger.error(f"Error in advanced ensemble decision: {e}")
+            raise
+
+    async def _use_basic_ensemble_decision(
+        self,
+        market_data: Dict,
+        portfolio_data: Dict,
+        news_summary: str,
+        min_consensus_confidence: float
+    ) -> Optional[TradingDecision]:
+        """
+        Use basic consensus (Grok-4 + Grok-3) as fallback.
+
+        Args:
+            market_data: Market information
+            portfolio_data: Portfolio state
+            news_summary: Optional news context
+            min_consensus_confidence: Minimum confidence required from both models
+
+        Returns:
+            TradingDecision if models reach consensus, None otherwise.
+        """
+        self.logger.info("🔄 Using basic ensemble consensus (Grok-4 + Grok-3)")
+
+        # Query primary model (Grok-4)
+        primary_decision = await self._get_trading_decision_with_prompt(
+            market_data, portfolio_data, news_summary, ml_prediction=None, use_simplified=False
+        )
+
+        if not primary_decision:
+            self.logger.warning("Primary model (Grok-4) returned no decision")
+            return None
+
+        # Query fallback model (Grok-3) with same prompt
+        # Temporarily switch model
+        original_model = self.primary_model
+        self.primary_model = self.fallback_model
+
+        try:
+            secondary_decision = await self._get_trading_decision_with_prompt(
+                market_data, portfolio_data, news_summary, ml_prediction=None, use_simplified=True
+            )
+        finally:
+            self.primary_model = original_model  # Restore
+
+        if not secondary_decision:
+            self.logger.warning("Secondary model (Grok-3) returned no decision")
+            return None
+
+        # Check consensus
+        action_match = primary_decision.action == secondary_decision.action
+        side_match = primary_decision.side == secondary_decision.side
+
+        primary_confident = primary_decision.confidence >= min_consensus_confidence
+        secondary_confident = secondary_decision.confidence >= min_consensus_confidence
+
+        if action_match and side_match and primary_confident and secondary_confident:
+            # Consensus reached - use average confidence
+            avg_confidence = (primary_decision.confidence + secondary_decision.confidence) / 2
+
+            self.logger.info(
+                f"✅ [ENSEMBLE CONSENSUS] Action: {primary_decision.action}, Side: {primary_decision.side} "
+                f"(Grok-4: {primary_decision.confidence:.1%}, Grok-3: {secondary_decision.confidence:.1%})"
+            )
+
+            return TradingDecision(
+                action=primary_decision.action,
+                side=primary_decision.side,
+                confidence=avg_confidence,
+                limit_price=primary_decision.limit_price,
+                reasoning=f"[MULTI-AGENT ENSEMBLE] Grok-4 + Grok-3 consensus. {primary_decision.reasoning}"
+            )
+        else:
+            self.logger.info(
+                f"⚠️ [ENSEMBLE DISAGREEMENT] Decision blocked due to lack of consensus. "
+                f"Grok-4: {primary_decision.action}/{primary_decision.side} ({primary_decision.confidence:.1%}), "
+                f"Grok-3: {secondary_decision.action}/{secondary_decision.side} ({secondary_decision.confidence:.1%})"
+            )
+            return None
+
+    async def get_advanced_ensemble_decision(
+        self,
+        market_data: Dict,
+        portfolio_data: Dict,
+        news_summary: str = "",
+        trade_value: float = 25.0,
+        strategy: Optional[str] = None,
+        ensemble_config: Optional[Dict[str, Any]] = None
+    ) -> Optional[TradingDecision]:
+        """
+        Get advanced ensemble decision using sophisticated ensemble methods.
+
+        This method integrates with the EnsembleEngine to provide weighted voting,
+        confidence-based selection, cascading ensemble, disagreement detection,
+        and uncertainty quantification.
+
+        Args:
+            market_data: Market information
+            portfolio_data: Portfolio state
+            news_summary: Optional news context
+            trade_value: Value of the potential trade
+            strategy: Preferred ensemble strategy
+            ensemble_config: Custom ensemble configuration
+
+        Returns:
+            TradingDecision from advanced ensemble, None if no consensus
+        """
+        from src.config import settings as config_settings
+        from src.intelligence.ensemble_engine import EnsembleEngine, EnsembleConfig
+
+        if not config_settings.multi_model_ensemble:
+            # Feature disabled - use regular single-model decision
+            return await self.get_trading_decision(market_data, portfolio_data, news_summary)
+
+        try:
+            self.logger.info(
+                "🚀 Using advanced ensemble engine",
+                trade_value=trade_value,
+                strategy=strategy
+            )
+
+            # Initialize ensemble components if not already done
+            if not hasattr(self, '_ensemble_engine_initialized'):
+                await self._initialize_ensemble_engine()
+
+            # Convert market data for ensemble engine
+            enhanced_market_data = {
+                **market_data,
+                "news_summary": news_summary,
+                "trade_value": trade_value,
+                "timestamp": datetime.now()
+            }
+
+            # Get ensemble decision
+            ensemble_result = await self._ensemble_engine.get_ensemble_decision(
+                enhanced_market_data,
+                portfolio_data,
+                trade_value,
+                market_data.get("category", "unknown"),
+                strategy
+            )
+
+            if ensemble_result.final_decision:
+                self.logger.info(
+                    f"✅ [ADVANCED ENSEMBLE] {ensemble_result.final_decision.action} "
+                    f"(confidence: {ensemble_result.final_decision.confidence:.1%}, "
+                    f"strategy: {ensemble_result.ensemble_strategy.value})"
+                )
+
+                # Add ensemble metadata to reasoning
+                enhanced_reasoning = (
+                    f"[ADVANCED ENSEMBLE] {ensemble_result.final_decision.reasoning} | "
+                    f"Strategy: {ensemble_result.ensemble_strategy.value} | "
+                    f"Models: {', '.join(ensemble_result.models_consulted)} | "
+                    f"Uncertainty: {ensemble_result.uncertainty_score:.2f}"
+                )
+
+                return TradingDecision(
+                    action=ensemble_result.final_decision.action,
+                    side=ensemble_result.final_decision.side,
+                    confidence=ensemble_result.final_decision.confidence,
+                    limit_price=ensemble_result.final_decision.limit_price,
+                    reasoning=enhanced_reasoning
+                )
+            else:
+                self.logger.info(
+                    f"⚠️ [ADVANCED ENSEMBLE] No decision - "
+                    f"Disagreement: {ensemble_result.disagreement_detected}, "
+                    f"Uncertainty: {ensemble_result.uncertainty_score:.2f}"
+                )
+                return None
+
+        except Exception as e:
+            self.logger.error(f"Error in advanced ensemble decision: {e}")
+            # Fall back to basic ensemble
+            return await self.get_ensemble_decision(
+                market_data, portfolio_data, news_summary, min_consensus_confidence=0.6
+            )
+
+    async def _initialize_ensemble_engine(self) -> None:
+        """Initialize the ensemble engine and its dependencies."""
+        try:
+            from src.utils.performance_tracker import PerformanceTracker
+            from src.intelligence.model_selector import ModelSelector
+            from src.intelligence.ensemble_engine import EnsembleConfig
+
+            # Create performance tracker
+            self._performance_tracker = PerformanceTracker(self.db_manager)
+
+            # Create model selector
+            self._model_selector = ModelSelector(self._performance_tracker)
+
+            # Create ensemble engine
+            config = EnsembleConfig()
+            self._ensemble_engine = EnsembleEngine(
+                self.db_manager,
+                self._performance_tracker,
+                self._model_selector,
+                config
+            )
+
+            self._ensemble_engine_initialized = True
+            self.logger.info("Advanced ensemble engine initialized successfully")
+
+        except Exception as e:
+            self.logger.error(f"Failed to initialize ensemble engine: {e}")
+            self._ensemble_engine_initialized = False
 
     async def get_trading_decision(
         self,

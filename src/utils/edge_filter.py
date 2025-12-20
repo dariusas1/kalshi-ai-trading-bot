@@ -34,19 +34,19 @@ class EdgeFilter:
     UPDATED: More aggressive thresholds to allow more trading opportunities.
     """
     
-    # DECREASED: More permissive edge requirements for more trades
-    MIN_EDGE_REQUIREMENT = 0.08        # DECREASED: 8% minimum edge (was 15%)
-    HIGH_CONFIDENCE_EDGE = 0.06        # DECREASED: 6% edge for high confidence (was 12%)  
-    MEDIUM_CONFIDENCE_EDGE = 0.08      # DECREASED: 8% edge for medium confidence (was 15%)
-    LOW_CONFIDENCE_EDGE = 0.12         # DECREASED: 12% edge for low confidence (was 20%)
-    
-    # DECREASED: More permissive filters for more opportunities
-    MIN_CONFIDENCE_FOR_TRADE = 0.50    # DECREASED: 50% minimum confidence (was 65%)
-    MAX_ACCEPTABLE_RISK = 0.6          # INCREASED: 60% max position risk (was 50%)
-    
-    # UPDATED: More permissive quality filters
-    MIN_VOLUME_FOR_HIGH_EDGE = 500     # DECREASED: Lower volume requirement (was 2000, now 500)
-    MIN_SPREAD_QUALITY = 0.03          # INCREASED: Allow wider spreads (was 0.02, now 0.03)
+    # CONSERVATIVE: Require substantial edge for trading
+    MIN_EDGE_REQUIREMENT = 0.08       # RESTORED: 8% minimum edge
+    HIGH_CONFIDENCE_EDGE = 0.05       # RESTORED: 5% edge for high confidence
+    MEDIUM_CONFIDENCE_EDGE = 0.10     # RESTORED: 10% edge for medium confidence
+    LOW_CONFIDENCE_EDGE = 0.15         # RESTORED: 15% edge for low confidence
+
+    # STRICT: High confidence threshold for quality trades
+    MIN_CONFIDENCE_FOR_TRADE = 0.50    # RESTORED: 50% minimum confidence
+    MAX_ACCEPTABLE_RISK = 0.5          # RESTORED: 50% max position risk
+
+    # QUALITY: Maintain high standards for market quality
+    MIN_VOLUME_FOR_HIGH_EDGE = 2000    # RESTORED: Higher volume requirement
+    MIN_SPREAD_QUALITY = 0.02          # RESTORED: Tighter spread requirements
     
     @classmethod
     def calculate_edge(

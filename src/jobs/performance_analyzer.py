@@ -134,15 +134,15 @@ class TradingPerformanceAnalyzer:
                 
                 # Calculate unrealized P&L for current positions
                 cursor = await db.execute("""
-                     SELECT 
+                     SELECT
                          COUNT(*) as open_positions,
                          SUM(entry_price * quantity) as total_exposure
-                     FROM positions 
+                     FROM positions
                      WHERE status = 'open'
                  """)
-                 open_position_stats = await cursor.fetchone()
-                 
-                 data['performance'] = {
+                open_position_stats = await cursor.fetchone()
+
+                data['performance'] = {
                      'overall_stats': {
                          'total_trades': trade_stats[0] if trade_stats else 0,
                          'winning_trades': trade_stats[1] if trade_stats else 0,

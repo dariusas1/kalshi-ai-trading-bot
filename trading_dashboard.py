@@ -22,6 +22,7 @@ import sys
 import os
 from datetime import datetime, timedelta
 import json
+import time
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -407,11 +408,18 @@ def main():
             st.cache_data.clear()
             st.rerun()
     
-    # Auto-refresh logic
+    # Auto-refresh logic - using non-blocking approach
     if auto_refresh:
-        import time
-        time.sleep(30)
-        st.rerun()
+        # Use Streamlit's built-in rerun mechanism for auto-refresh
+        # The user can manually refresh or we can use session state for timing
+        if 'last_refresh' not in st.session_state:
+            st.session_state.last_refresh = time.time()
+
+        # Auto-refresh every 30 seconds without blocking
+        current_time = time.time()
+        if current_time - st.session_state.last_refresh >= 30:
+            st.session_state.last_refresh = current_time
+            st.rerun()
     
     # Sidebar for navigation
     st.sidebar.title("📊 Dashboard")
@@ -874,8 +882,6 @@ def show_llm_analysis(llm_queries, llm_stats):
         
         if has_estimated_tokens:
             st.caption("*Token counts marked with * are estimated from response text length due to missing usage data")
-        
-            st.plotly_chart(fig_usage, width='stretch')
             
         # New AI Insights (Cost History & Confidence Distribution)
         st.subheader("💡 AI Insights")

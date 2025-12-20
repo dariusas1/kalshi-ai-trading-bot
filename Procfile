@@ -1,0 +1,1 @@
+web: python beast_mode_bot.py

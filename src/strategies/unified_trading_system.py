@@ -311,18 +311,29 @@ class UnifiedAdvancedTradingSystem:
             max_days_to_expiry=365  # Accept any timeline with dynamic exits
         )
             if not markets:
-                self.logger.warning("No markets available for trading")
+                self.logger.warning("❌ No markets available for trading - DATABASE EMPTY?")
                 return TradingSystemResults()
-            
-            self.logger.info(f"Analyzing {len(markets)} markets across all strategies")
+
+            self.logger.info(f"📊 TOTAL MARKETS AVAILABLE: {len(markets)} markets for analysis")
             
             # Step 2: Parallel strategy analysis
+            self.logger.info("🚀 STARTING PARALLEL STRATEGY ANALYSIS...")
             market_making_results, portfolio_allocation, quick_flip_results = await asyncio.gather(
                 self._execute_market_making_strategy(markets),
                 self._execute_directional_trading_strategy(markets),
                 self._execute_quick_flip_strategy(markets)
             )
-            
+
+            # Log strategy results
+            mm_trades = market_making_results.get('market_making_trades', 0) if market_making_results else 0
+            qf_trades = quick_flip_results.get('quick_flip_trades', 0) if quick_flip_results else 0
+            pa_allocations = len(portfolio_allocation.allocations) if portfolio_allocation and portfolio_allocation.allocations else 0
+
+            self.logger.info(f"📊 STRATEGY RESULTS:")
+            self.logger.info(f"   Market Making: {mm_trades} trades")
+            self.logger.info(f"   Quick Flip: {qf_trades} trades")
+            self.logger.info(f"   Directional: {pa_allocations} allocations")
+
             # Step 3: Execute arbitrage opportunities
             if self.config.arbitrage_allocation > 0:
                 arbitrage_results = await self._execute_arbitrage_strategy(markets)
@@ -417,15 +428,18 @@ class UnifiedAdvancedTradingSystem:
         """
         try:
             self.logger.info(f"🎯 Executing Directional Trading Strategy")
-            
+            self.logger.info(f"📊 MARKETS RECEIVED: {len(markets)} total markets for directional analysis")
+
             # Convert markets to opportunities (with immediate trading capability)
             opportunities = await create_market_opportunities_from_markets(
-                markets, self.xai_client, self.kalshi_client, 
+                markets, self.xai_client, self.kalshi_client,
                 self.db_manager, self.directional_capital
             )
-            
+
+            self.logger.info(f"🎯 OPPORTUNITIES CREATED: {len(opportunities) if opportunities else 0} directional opportunities")
+
             if not opportunities:
-                self.logger.warning("No directional trading opportunities found")
+                self.logger.warning("❌ No directional trading opportunities found - EDGE FILTERING TOO STRICT?")
                 return self.portfolio_optimizer._empty_allocation()
             
             # Filter opportunities based on available capital
@@ -435,7 +449,12 @@ class UnifiedAdvancedTradingSystem:
             
             # Optimize portfolio
             allocation = await self.portfolio_optimizer.optimize_portfolio(opportunities)
-            
+
+            self.logger.info(f"📊 PORTFOLIO OPTIMIZATION: {len(allocation.allocations) if allocation else 0} allocations created")
+            if allocation and allocation.allocations:
+                total_allocation = sum(pos.count * pos.entry_price for pos in allocation.allocations)
+                self.logger.info(f"💰 TOTAL ALLOCATION: ${total_allocation:.2f} out of ${self.directional_capital:.2f}")
+
             # Restore original capital setting
             self.portfolio_optimizer.total_capital = original_capital
             

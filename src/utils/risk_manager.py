@@ -309,8 +309,8 @@ class RiskManager:
                     action="sell",
                     count=position.quantity,
                     type_="market",
-                    yes_price=1 if position.side.lower() == "yes" else None,
-                    no_price=1 if position.side.lower() == "no" else None
+                    yes_price=None,
+                    no_price=None
                 )
                 
                 if response and 'order' in response:
@@ -367,8 +367,8 @@ class RiskManager:
                     action="sell",
                     count=contracts_to_sell,
                     type_="market",
-                    yes_price=1 if position.side.lower() == "yes" else None,
-                    no_price=1 if position.side.lower() == "no" else None
+                    yes_price=None,
+                    no_price=None
                 )
                 
                 if response and 'order' in response:

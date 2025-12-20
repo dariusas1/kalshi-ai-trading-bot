@@ -92,6 +92,9 @@ async def analyze_ai_costs(db_manager: DatabaseManager) -> Dict:
     if weekly_analyses > weekly_decisions * 3:  # Too many analyses relative to decisions
         recommendations.append("🔄 High analysis-to-decision ratio - improve filtering")
     
+    # Get soft budget for utilization calculation
+    soft_budget = settings.trading.daily_ai_budget
+
     # Log comprehensive cost report
     logger.info(
         "AI Cost Analysis Report",
@@ -195,13 +198,15 @@ async def run_evaluation():
     try:
         # Analyze AI costs and efficiency
         cost_analysis = await analyze_ai_costs(db_manager)
-        
+
         # Analyze trading performance
         performance_analysis = await analyze_trading_performance(db_manager)
-        
+
         # Generate overall system health summary
         daily_cost = cost_analysis['daily_costs'][datetime.now().strftime('%Y-%m-%d')]['cost']
-    budget_utilization = daily_cost / soft_budget
+        soft_budget = settings.trading.daily_ai_budget
+        hard_limit = settings.get_ai_daily_limit()
+        budget_utilization = daily_cost / soft_budget
         
         health_status = "🟢 HEALTHY"
         if budget_utilization > 0.9:
@@ -216,19 +221,19 @@ async def run_evaluation():
             total_recommendations=len(cost_analysis['recommendations']),
             open_positions=performance_analysis.get('position_stats', [0])[0] if performance_analysis.get('position_stats') else 0
         )
-        
+
         # If costs are high, suggest immediate actions
-    if budget_utilization > 0.8:
-        logger.warning(
-            "HIGH COST ALERT: Consider immediate actions",
-            suggestions=[
-                "Increase analysis_cooldown_hours",
-                    "Raise min_volume_for_ai_analysis threshold", 
+        if budget_utilization > 0.8:
+            logger.warning(
+                "HIGH COST ALERT: Consider immediate actions",
+                suggestions=[
+                    "Increase analysis_cooldown_hours",
+                    "Raise min_volume_for_ai_analysis threshold",
                     "Enable skip_news_for_low_volume",
                     "Reduce max_analyses_per_market_per_day"
                 ]
             )
-    
+
     except Exception as e:
         logger.error("Error in evaluation job", error=str(e), exc_info=True)
 
