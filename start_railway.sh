@@ -25,12 +25,27 @@ python init_database.py
 # Only start background processes if we have API keys
 if [ "$DEMO_MODE" = false ]; then
     echo "🤖 Starting trading bot in background..."
-    python beast_mode_bot.py &
-    BOT_PID=$!
+
+    # Check if trading bot can start (has all dependencies)
+    if python -c "from beast_mode_dashboard import BeastModeDashboard; print('Dependencies OK')" 2>/dev/null; then
+        python beast_mode_bot.py &
+        BOT_PID=$!
+        echo "✅ Trading bot started (PID: $BOT_PID)"
+    else
+        echo "⚠️  Trading bot has missing dependencies - skipping for now"
+        echo "    Dashboard will still work with live API access"
+        BOT_PID=""
+    fi
 
     echo "📊 Starting analytics processor in background..."
-    python src/analytics/analytics_processor.py &
-    ANALYTICS_PID=$!
+    if [ -f "src/analytics/analytics_processor.py" ]; then
+        python src/analytics/analytics_processor.py &
+        ANALYTICS_PID=$!
+        echo "✅ Analytics processor started (PID: $ANALYTICS_PID)"
+    else
+        echo "⚠️  Analytics processor not found - skipping"
+        ANALYTICS_PID=""
+    fi
 else
     echo "🎭 Demo mode: Skipping background processes"
 fi
