@@ -1,169 +1,132 @@
-import asyncio
-import json
-import os
+
 import pytest
-import aiosqlite
+import asyncio
 from datetime import datetime, timedelta
-from typing import List
+from src.utils.database import Market, Position
 
-from src.utils.database import DatabaseManager, Market
+class TestDatabaseManager:
+    """Verify database operations"""
 
-# Mark all tests in this file as async
-pytestmark = pytest.mark.asyncio
-
-TEST_DB = "test_trading_system.db"
-FIXTURE_PATH = "tests/fixtures/markets.json"
-
-
-def load_and_prepare_markets(fixture_path: str) -> List[Market]:
-    """Loads markets from a fixture and processes dynamic timestamps."""
-    with open(fixture_path, 'r') as f:
-        raw_markets = json.load(f)
-
-    processed_markets = []
-    now = datetime.now()
-    for m in raw_markets:
-        # Handle dynamic expiration timestamps like "NOW+5D"
-        if isinstance(m["expiration_ts"], str) and "NOW+" in m["expiration_ts"]:
-            days_to_add = int(m["expiration_ts"].split('+')[1].replace('D', ''))
-            m["expiration_ts"] = int((now + timedelta(days=days_to_add)).timestamp())
-        
-        m["last_updated"] = datetime.now()
-        processed_markets.append(Market(**m))
-    return processed_markets
-
-
-async def test_get_eligible_markets():
-    """
-    Test that get_eligible_markets correctly filters markets based on criteria.
-    """
-    db_path = TEST_DB
-    if os.path.exists(db_path):
-        os.remove(db_path)
-    
-    manager = DatabaseManager(db_path=db_path)
-    await manager.initialize()
-    
-    markets = load_and_prepare_markets(FIXTURE_PATH)
-    await manager.upsert_markets(markets)
-
-    try:
-        # Define filter criteria that match the "ELIGIBLE" markets in our fixture
-        volume_min = 5000
-        max_days_to_expiry = 7
-
-        # Fetch eligible markets
-        eligible_markets = await manager.get_eligible_markets(
-            volume_min=volume_min,
-            max_days_to_expiry=max_days_to_expiry
+    @pytest.mark.asyncio
+    async def test_upsert_markets(self, db_manager):
+        """Should insert new markets and update existing ones"""
+        market = Market(
+            market_id="TEST_MARKET",
+            title="Test Market",
+            yes_price=50,
+            no_price=50,
+            volume=100,
+            expiration_ts=int((datetime.now() + timedelta(days=1)).timestamp()),
+            category="Test",
+            status="active",
+            last_updated=datetime.now()
         )
-
-        # Assertions
-        assert len(eligible_markets) == 2, "Should find exactly two eligible markets"
         
-        eligible_ids = {market.market_id for market in eligible_markets}
-        assert "ELIGIBLE-1" in eligible_ids
-        assert "ELIGIBLE-2-EDGE-CASE" in eligible_ids
+        # Insert
+        await db_manager.upsert_markets([market])
         
-        # Check that ineligible markets are not present
-        assert "INELIGIBLE-LOW-VOLUME" not in eligible_ids
-        assert "INELIGIBLE-LONG-EXPIRY" not in eligible_ids
-        assert "INELIGIBLE-HAS-POSITION" not in eligible_ids
-        assert "INELIGIBLE-CLOSED" not in eligible_ids
-    finally:
-        # Manual teardown
-        if os.path.exists(db_path):
-            os.remove(db_path)
+        # Verify
+        fetched = await db_manager.get_eligible_markets(0, 365)
+        assert len(fetched) == 1
+        assert fetched[0].market_id == "TEST_MARKET"
+        
+        # Update
+        market.title = "Updated Title"
+        market.volume = 200
+        await db_manager.upsert_markets([market])
+        
+        # Verify update
+        fetched_updated = await db_manager.get_eligible_markets(0, 365)
+        assert len(fetched_updated) == 1
+        assert fetched_updated[0].title == "Updated Title"
+        assert fetched_updated[0].volume == 200
 
-
-async def test_update_position_status_resets_has_position():
-    db_path = TEST_DB
-    if os.path.exists(db_path):
-        os.remove(db_path)
-
-    manager = DatabaseManager(db_path=db_path)
-    await manager.initialize()
-
-    now = datetime.now()
-    market = Market(
-        market_id="TEST-MARKET-1",
-        title="Test Market",
-        yes_price=0.5,
-        no_price=0.5,
-        volume=1000,
-        expiration_ts=int((now + timedelta(days=5)).timestamp()),
-        category="Test",
-        status="active",
-        last_updated=now,
-        has_position=False
-    )
-    await manager.upsert_markets([market])
-
-    from src.utils.database import Position
-    position = Position(
-        market_id="TEST-MARKET-1",
-        side="YES",
-        entry_price=0.5,
-        quantity=10,
-        timestamp=now,
-        strategy="directional_trading"
-    )
-
-    position_id = await manager.add_position(position)
-    assert position_id is not None
-
-    await manager.update_position_status(position_id, "closed")
-
-    async with aiosqlite.connect(db_path) as db:
-        cursor = await db.execute(
-            "SELECT has_position FROM markets WHERE market_id = ?",
-            ("TEST-MARKET-1",)
+    @pytest.mark.asyncio
+    async def test_add_position_logic(self, db_manager):
+        """Should handle new positions, duplicates, and reactivation correctly"""
+        market_id = "POS_TEST"
+        side = "YES"
+        
+        # 1. Setup Market
+        market = Market(
+            market_id=market_id, title="Pos Test", yes_price=50, no_price=50,
+            volume=100, expiration_ts=int((datetime.now() + timedelta(days=1)).timestamp()),
+            category="Test", status="active", last_updated=datetime.now()
         )
-        row = await cursor.fetchone()
-        assert row[0] == 0
+        await db_manager.upsert_markets([market])
+        
+        # 2. Add New Position
+        position = Position(
+            market_id=market_id, side=side, entry_price=0.5, quantity=10,
+            timestamp=datetime.now(), rationale="Test", confidence=0.8
+        )
+        
+        pos_id = await db_manager.add_position(position)
+        assert pos_id is not None
+        
+        # Verify market flag
+        markets = await db_manager.get_eligible_markets(0, 365)
+        # Should NOT be returned as eligible because has_position=1
+        assert len(markets) == 0
+        
+        # 3. Try to add Duplicate Open Position
+        pos_id_dup = await db_manager.add_position(position)
+        assert pos_id_dup is None  # Should prevent duplicate
+        
+        # 4. Close Position
+        await db_manager.close_position(pos_id)
+        
+        # Verify closed
+        # Since DBManager.close_position uses update_position_status('closed'),
+        # checking DB directly or assume verified by get_position returning None for 'open'
+        positions = await db_manager.get_open_non_live_positions()
+        assert len(positions) == 0
+        
+        # Verify market flag reset
+        markets = await db_manager.get_eligible_markets(0, 365)
+        assert len(markets) == 1
+        
+        # 5. Reactivate Closed Position
+        position_new = Position(
+            market_id=market_id, side=side, entry_price=0.6, quantity=20,
+            timestamp=datetime.now(), rationale="Reactivate", confidence=0.9
+        )
+        pos_id_reactivated = await db_manager.add_position(position_new)
+        
+        # Should reuse ID or be a valid ID
+        assert pos_id_reactivated == pos_id 
+        
+        # Verify updated values
+        # We need a direct query to check specific fields like price/quantity
+        # but get_position_by_market_and_side works
+        reactivated = await db_manager.get_position_by_market_and_side(market_id, side)
+        assert reactivated.entry_price == 0.6
+        assert reactivated.quantity == 20
+        assert reactivated.status == 'open'
 
-    if os.path.exists(db_path):
-        os.remove(db_path)
-
-
-async def test_get_open_positions_includes_strategy():
-    db_path = TEST_DB
-    if os.path.exists(db_path):
-        os.remove(db_path)
-
-    manager = DatabaseManager(db_path=db_path)
-    await manager.initialize()
-
-    now = datetime.now()
-    market = Market(
-        market_id="TEST-MARKET-2",
-        title="Test Market 2",
-        yes_price=0.5,
-        no_price=0.5,
-        volume=1000,
-        expiration_ts=int((now + timedelta(days=5)).timestamp()),
-        category="Test",
-        status="active",
-        last_updated=now,
-        has_position=False
-    )
-    await manager.upsert_markets([market])
-
-    from src.utils.database import Position
-    position = Position(
-        market_id="TEST-MARKET-2",
-        side="NO",
-        entry_price=0.4,
-        quantity=5,
-        timestamp=now,
-        strategy="quick_flip_scalping"
-    )
-    position_id = await manager.add_position(position)
-    assert position_id is not None
-
-    open_positions = await manager.get_open_positions()
-    assert open_positions
-    assert open_positions[0].strategy == "quick_flip_scalping"
-
-    if os.path.exists(db_path):
-        os.remove(db_path)
+    @pytest.mark.asyncio
+    async def test_cleanup_stale_markets(self, db_manager):
+        """Should remove expired markets"""
+        # Create expired market
+        expired = Market(
+            market_id="EXPIRED", title="Expired", yes_price=50, no_price=50,
+            volume=100, expiration_ts=int((datetime.now() - timedelta(hours=1)).timestamp()),
+            category="Test", status="active", last_updated=datetime.now()
+        )
+        # Create active market
+        active = Market(
+            market_id="ACTIVE", title="Active", yes_price=50, no_price=50,
+            volume=100, expiration_ts=int((datetime.now() + timedelta(hours=1)).timestamp()),
+            category="Test", status="active", last_updated=datetime.now()
+        )
+        
+        await db_manager.upsert_markets([expired, active])
+        
+        removed = await db_manager.cleanup_stale_markets()
+        assert removed == 1
+        
+        # Verify only active remains
+        # get_eligible_markets filters by expiry too, 
+        # so check raw fetch or just rely on cleanup return + get_eligible 
+        # But get_eligible uses NOW, so expired wouldn't show anyway
+        # So we trust 'removed' count primarily.

@@ -4,9 +4,10 @@ Trade Execution Job
 This job takes a position and executes it as a trade.
 """
 import asyncio
+import json
 import uuid
-from datetime import datetime
-from typing import Optional, Dict, Tuple
+from datetime import datetime, timedelta
+from typing import Optional, Dict, Tuple, List
 
 from src.utils.database import DatabaseManager, Position
 from src.config.settings import settings
@@ -58,6 +59,25 @@ async def execute_position(
         try:
             client_order_id = str(uuid.uuid4())
             
+            # === PRODUCTION SAFETY: IDEMPOTENCY KEY TRACKING ===
+            # Store key BEFORE API call to prevent duplicates on retry
+            key_stored = await db_manager.store_idempotency_key(
+                idempotency_key=client_order_id,
+                market_id=position.market_id,
+                side=position.side.lower(),
+                action="buy",
+                status="pending"
+            )
+            if not key_stored:
+                # Key already exists - this is a duplicate request
+                logger.warning(f"🚫 Duplicate order blocked for {position.market_id}")
+                # Check if original order succeeded
+                existing = await db_manager.check_idempotency_key(client_order_id)
+                if existing and existing.get("status") == "filled":
+                    logger.info(f"✅ Original order already filled for {position.market_id}")
+                    return True
+                return False
+            
             # 🎯 SMART ORDER TYPE SELECTION
             # IOC for high edge (>10%) - urgent entry needed
             # Market orders for standard entries
@@ -98,6 +118,14 @@ async def execute_position(
             order_info = order_response.get('order', {})
             order_id = order_info.get('order_id')
             order_status = order_info.get('status', 'unknown')
+            
+            # === PRODUCTION SAFETY: UPDATE IDEMPOTENCY RESULT ===
+            await db_manager.update_idempotency_result(
+                idempotency_key=client_order_id,
+                status=order_status,
+                order_id=order_id,
+                response_json=json.dumps(order_info)
+            )
             
             logger.info(f"Order placed for {position.market_id}. Order ID: {order_id}, Status: {order_status}")
             
@@ -562,3 +590,152 @@ async def close_position_market(
     except Exception as e:
         logger.error(f"❌ Error in market exit: {e}")
         return False, 0.0
+
+
+# =============================================================================
+# === PRODUCTION SAFETY: EXPIRATION RISK AUTO-EXIT ===
+# =============================================================================
+
+async def auto_exit_expiring_positions(
+    db_manager: DatabaseManager,
+    kalshi_client: KalshiClient,
+    minutes_before_expiry: int = 30
+) -> Dict[str, int]:
+    """
+    Automatically close positions that are within X minutes of market expiration.
+    
+    This prevents:
+    - Force-settlement at unfavorable prices
+    - Illiquidity as market approaches close
+    - Surprise resolution outcomes
+    
+    Args:
+        db_manager: Database manager
+        kalshi_client: Kalshi API client
+        minutes_before_expiry: Minutes before expiration to trigger auto-exit (default: 30)
+    
+    Returns:
+        Dictionary with results: {'positions_closed': int, 'positions_checked': int, 'total_pnl': float}
+    """
+    logger = get_trading_logger("expiration_exit")
+    
+    results = {
+        'positions_closed': 0,
+        'positions_checked': 0,
+        'total_pnl': 0.0,
+        'positions_failed': 0
+    }
+    
+    if not settings.trading.auto_exit_expiring_enabled:
+        logger.debug("Expiration auto-exit is disabled")
+        return results
+    
+    try:
+        # Get all open live positions
+        positions = await db_manager.get_open_live_positions()
+        
+        if not positions:
+            logger.debug("No open positions to check for expiration risk")
+            return results
+        
+        now = datetime.now()
+        expiry_threshold = now + timedelta(minutes=minutes_before_expiry)
+        expiry_threshold_ts = int(expiry_threshold.timestamp())
+        
+        logger.info(f"⏰ Checking {len(positions)} positions for expiration risk (threshold: {minutes_before_expiry} min)")
+        
+        for position in positions:
+            try:
+                results['positions_checked'] += 1
+                
+                # Get market data to check expiration
+                market_response = await kalshi_client.get_market(position.market_id)
+                market_data = market_response.get('market', {})
+                
+                if not market_data:
+                    logger.warning(f"Could not get market data for {position.market_id}")
+                    continue
+                
+                # Check expiration time
+                expiration_ts = market_data.get('expiration_time') or market_data.get('close_time')
+                
+                if not expiration_ts:
+                    # Try to parse from different formats
+                    exp_str = market_data.get('expiration_time') or market_data.get('end_date')
+                    if exp_str:
+                        try:
+                            expiration_ts = int(datetime.fromisoformat(exp_str.replace('Z', '+00:00')).timestamp())
+                        except:
+                            continue
+                    else:
+                        continue
+                
+                # Convert if it's a string timestamp
+                if isinstance(expiration_ts, str):
+                    try:
+                        expiration_ts = int(datetime.fromisoformat(expiration_ts.replace('Z', '+00:00')).timestamp())
+                    except:
+                        expiration_ts = int(expiration_ts) if expiration_ts.isdigit() else 0
+                
+                # Check if market expires within threshold
+                if expiration_ts <= expiry_threshold_ts:
+                    minutes_remaining = (expiration_ts - int(now.timestamp())) / 60
+                    
+                    logger.warning(
+                        f"⚠️ EXPIRATION RISK: {position.market_id} expires in {minutes_remaining:.0f} min "
+                        f"(threshold: {minutes_before_expiry} min) - AUTO-EXITING"
+                    )
+                    
+                    # Calculate current price for P&L
+                    if position.side == "YES":
+                        current_price = market_data.get('yes_bid', 0)
+                        if isinstance(current_price, (int, float)):
+                            current_price = current_price / 100 if current_price > 1 else current_price
+                    else:
+                        current_price = market_data.get('no_bid', 0)
+                        if isinstance(current_price, (int, float)):
+                            current_price = current_price / 100 if current_price > 1 else current_price
+                    
+                    # Execute market exit
+                    success, exit_price = await close_position_market(
+                        position=position,
+                        db_manager=db_manager,
+                        kalshi_client=kalshi_client
+                    )
+                    
+                    if success:
+                        results['positions_closed'] += 1
+                        pnl = (exit_price - position.entry_price) * position.quantity
+                        results['total_pnl'] += pnl
+                        
+                        # Close position in database
+                        await db_manager.close_position(position.id)
+                        
+                        logger.info(
+                            f"✅ AUTO-EXITED {position.market_id} before expiration: "
+                            f"Entry=${position.entry_price:.2f}, Exit=${exit_price:.2f}, "
+                            f"P&L=${pnl:.2f}"
+                        )
+                    else:
+                        results['positions_failed'] += 1
+                        logger.error(f"❌ Failed to auto-exit {position.market_id}")
+                        
+            except Exception as e:
+                logger.error(f"Error checking expiration for {position.market_id}: {e}")
+                continue
+        
+        # Summary
+        if results['positions_closed'] > 0:
+            logger.warning(
+                f"⏰ Expiration auto-exit summary: "
+                f"Closed {results['positions_closed']}/{results['positions_checked']} positions, "
+                f"Total P&L: ${results['total_pnl']:.2f}"
+            )
+        else:
+            logger.debug(f"No positions require expiration exit ({results['positions_checked']} checked)")
+        
+        return results
+        
+    except Exception as e:
+        logger.error(f"Error in expiration auto-exit: {e}")
+        return results

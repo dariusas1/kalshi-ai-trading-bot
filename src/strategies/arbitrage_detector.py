@@ -387,6 +387,20 @@ class ArbitrageDetector:
                 results['leg1_executed'] = True
                 results['total_cost'] += opportunity.price_1 * opportunity.quantity
                 
+                # Record leg 1 position in database
+                leg1_position = Position(
+                    market_id=opportunity.market_id_1,
+                    side=opportunity.side_1,
+                    entry_price=opportunity.price_1,
+                    quantity=opportunity.quantity,
+                    timestamp=datetime.now(),
+                    strategy="arbitrage",
+                    rationale=f"Arbitrage {opportunity.arb_type} leg 1 - paired with {opportunity.market_id_2}",
+                    confidence=opportunity.confidence,
+                    live=live_mode
+                )
+                await self.db_manager.add_position(leg1_position)
+                
                 self.logger.info(
                     f"✅ ARB LEG 1 EXECUTED: {opportunity.side_1} {opportunity.quantity} "
                     f"{opportunity.market_id_1} @ {opportunity.price_1:.2f}"
@@ -418,6 +432,20 @@ class ArbitrageDetector:
                 results['leg2_executed'] = True
                 results['total_cost'] += opportunity.price_2 * opportunity.quantity
                 results['success'] = True
+                
+                # Record leg 2 position in database
+                leg2_position = Position(
+                    market_id=opportunity.market_id_2,
+                    side=opportunity.side_2,
+                    entry_price=opportunity.price_2,
+                    quantity=opportunity.quantity,
+                    timestamp=datetime.now(),
+                    strategy="arbitrage",
+                    rationale=f"Arbitrage {opportunity.arb_type} leg 2 - paired with {opportunity.market_id_1}",
+                    confidence=opportunity.confidence,
+                    live=live_mode
+                )
+                await self.db_manager.add_position(leg2_position)
                 
                 self.logger.info(
                     f"✅ ARB LEG 2 EXECUTED: {opportunity.side_2} {opportunity.quantity} "

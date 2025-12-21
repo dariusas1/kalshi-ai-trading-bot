@@ -23,12 +23,15 @@ Key innovations:
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass, asdict
 import numpy as np
 
 from src.clients.kalshi_client import KalshiClient
+from src.clients.kalshi_client import KalshiClient
 from src.clients.xai_client import XAIClient
+from src.intelligence.enhanced_client import EnhancedAIClient
+from src.intelligence.ensemble_coordinator import EnsembleCoordinator
 from src.utils.database import DatabaseManager, Market, Position
 from src.config.settings import settings
 from src.utils.logging_setup import get_trading_logger
@@ -106,6 +109,11 @@ class TradingSystemResults:
     theta_exposure: float = 0.0
     theta_expected_profit: float = 0.0
     
+    # Arbitrage metrics
+    arbitrage_trades: int = 0
+    arbitrage_exposure: float = 0.0
+    arbitrage_expected_profit: float = 0.0
+    
     # Performance
     total_positions: int = 0
     capital_efficiency: float = 0.0  # % of capital used
@@ -137,12 +145,14 @@ class UnifiedAdvancedTradingSystem:
         self,
         db_manager: DatabaseManager,
         kalshi_client: KalshiClient,
-        xai_client: XAIClient,
-        config: Optional[TradingSystemConfig] = None
+        xai_client: Union[XAIClient, EnhancedAIClient],
+        config: Optional[TradingSystemConfig] = None,
+        ensemble_coordinator: Optional[EnsembleCoordinator] = None
     ):
         self.db_manager = db_manager
         self.kalshi_client = kalshi_client
         self.xai_client = xai_client
+        self.ensemble_coordinator = ensemble_coordinator
         self.config = config or TradingSystemConfig()
         self.logger = get_trading_logger("unified_trading_system")
         
@@ -153,6 +163,10 @@ class UnifiedAdvancedTradingSystem:
         # self.total_capital = getattr(settings.trading, 'total_capital', 10000)
         self.last_rebalance = datetime.now()
         self.system_metrics = {}
+        
+        if self.ensemble_coordinator:
+            self.logger.info("✅ Ensemble Coordinator linked to Unified System")
+        self.logger.info(f"Unified System initialized with Client: {type(xai_client).__name__}")
         
         # Capital allocation will be set by async_initialize() after getting actual balance
 
@@ -877,6 +891,11 @@ class UnifiedAdvancedTradingSystem:
                 theta_exposure=theta_results.get('total_exposure', 0.0) if theta_results else 0.0,
                 theta_expected_profit=theta_results.get('expected_profit', 0.0) if theta_results else 0.0,
                 
+                # Arbitrage
+                arbitrage_trades=arbitrage_results.get('arbitrage_trades', 0),
+                arbitrage_exposure=arbitrage_results.get('arbitrage_exposure', 0.0),
+                arbitrage_expected_profit=arbitrage_results.get('arbitrage_profit', 0.0),
+                
                 # Portfolio metrics
                 total_capital_used=total_capital_used,
                 portfolio_expected_return=portfolio_expected_return,
@@ -1015,8 +1034,9 @@ class UnifiedAdvancedTradingSystem:
 async def run_unified_trading_system(
     db_manager: DatabaseManager,
     kalshi_client: KalshiClient,
-    xai_client: XAIClient,
-    config: Optional[TradingSystemConfig] = None
+    xai_client: Union[XAIClient, EnhancedAIClient],
+    config: Optional[TradingSystemConfig] = None,
+    ensemble_coordinator: Optional[EnsembleCoordinator] = None
 ) -> TradingSystemResults:
     """
     Main entry point for the unified advanced trading system.
@@ -1031,7 +1051,7 @@ async def run_unified_trading_system(
         
         # Initialize system
         trading_system = UnifiedAdvancedTradingSystem(
-            db_manager, kalshi_client, xai_client, config
+            db_manager, kalshi_client, xai_client, config, ensemble_coordinator
         )
         
         # 🚨 CRITICAL: Initialize with dynamic balance from Kalshi

@@ -25,7 +25,7 @@ import logging
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, NamedTuple, Any
+from typing import Dict, List, Optional, Tuple, NamedTuple, Any, Union
 from dataclasses import dataclass
 from scipy.optimize import minimize, minimize_scalar
 import warnings
@@ -34,6 +34,8 @@ warnings.filterwarnings('ignore')
 from src.utils.database import DatabaseManager, Market, Position
 from src.clients.kalshi_client import KalshiClient
 from src.clients.xai_client import XAIClient
+from src.intelligence.enhanced_client import EnhancedAIClient
+from src.intelligence.ensemble_coordinator import EnsembleCoordinator
 from src.config.settings import settings
 from src.strategies.volatility_sizing import VolatilityAnalyzer, apply_volatility_adjustment
 from src.utils.logging_setup import get_trading_logger
@@ -101,7 +103,7 @@ class AdvancedPortfolioOptimizer:
         self,
         db_manager: DatabaseManager,
         kalshi_client: KalshiClient,
-        xai_client: XAIClient
+        xai_client: Union[XAIClient, EnhancedAIClient]
     ):
         self.db_manager = db_manager
         self.kalshi_client = kalshi_client
@@ -1024,7 +1026,7 @@ class AdvancedPortfolioOptimizer:
 
 async def create_market_opportunities_from_markets(
     markets: List[Market],
-    xai_client: XAIClient,
+    xai_client: Union[XAIClient, EnhancedAIClient],
     kalshi_client: KalshiClient,
     db_manager: DatabaseManager = None,
     total_capital: float = 10000
@@ -1195,9 +1197,8 @@ async def _evaluate_immediate_trade(
             confidence=opportunity.confidence,
             additional_filters={
                 'volume': getattr(opportunity, 'volume', 1000),
-                'min_volume': 1000,
                 'time_to_expiry_days': opportunity.time_to_expiry,
-                'max_time_to_expiry': 365
+                'max_time_to_expiry': settings.trading.max_time_to_expiry_days  # FIXED: Use settings (24 hours)
             }
         )
         
@@ -1324,7 +1325,7 @@ async def _evaluate_immediate_trade(
         # This prevents "fast" but wrong decisions on high-stakes trades
         logger.info(f"🕵️ Running DEEP RESEARCH verification for {opportunity.market_id}...")
         
-        verification_passed, verif_reason = await _verify_with_deep_research(
+        verification_passed, verif_reason, ai_decision = await _verify_with_deep_research(
             opportunity, db_manager, kalshi_client, xai_client
         )
         
@@ -1371,16 +1372,40 @@ async def _evaluate_immediate_trade(
             
         logger.info(f"📊 Trade details: {shares} {side} shares @ ${entry_price:.2f} = ${min_cost:.2f}")
         
-        # Calculate proper stop-loss levels using Grok4 recommendations
+        # Calculate stop-loss levels: Use AI-recommended if available, otherwise use StopLossCalculator
         from src.utils.stop_loss_calculator import StopLossCalculator
         
-        exit_levels = StopLossCalculator.calculate_stop_loss_levels(
-            entry_price=entry_price,
-            side=side,
-            confidence=opportunity.confidence,
-            market_volatility=opportunity.volatility,
-            time_to_expiry_days=opportunity.time_to_expiry
-        )
+        # Check if AI provided stop loss and take profit recommendations
+        ai_stop_loss = None
+        ai_take_profit = None
+        if ai_decision:
+            ai_stop_loss = getattr(ai_decision, 'stop_loss_cents', None)
+            ai_take_profit = getattr(ai_decision, 'take_profit_cents', None)
+        
+        if ai_stop_loss and ai_take_profit:
+            # Use AI-recommended levels (convert cents to decimal)
+            stop_loss_price = ai_stop_loss / 100
+            take_profit_price = ai_take_profit / 100
+            logger.info(f"🎯 Using AI-recommended exit levels: SL={stop_loss_price:.2f}, TP={take_profit_price:.2f}")
+            
+            # Use settings for max hold hours
+            exit_levels = {
+                'stop_loss_price': stop_loss_price,
+                'take_profit_price': take_profit_price,
+                'max_hold_hours': settings.trading.max_hold_time_hours,
+                'stop_loss_pct': abs(entry_price - stop_loss_price) / entry_price * 100 if entry_price > 0 else 10,
+                'target_confidence_change': settings.trading.confidence_decay_threshold
+            }
+        else:
+            # Fall back to StopLossCalculator defaults
+            logger.info("📊 Using StopLossCalculator defaults (AI didn't provide SL/TP)")
+            exit_levels = StopLossCalculator.calculate_stop_loss_levels(
+                entry_price=entry_price,
+                side=side,
+                confidence=opportunity.confidence,
+                market_volatility=opportunity.volatility,
+                time_to_expiry_days=opportunity.time_to_expiry
+            )
         
         # Create position directly
         from src.utils.database import Position
@@ -1393,14 +1418,14 @@ async def _evaluate_immediate_trade(
             entry_price=entry_price,
             live=False,  # Will be set to True ONLY after successful execution
             timestamp=datetime.now(),
-            rationale=f"IMMEDIATE TRADE: Edge={opportunity.edge:.1%}, Conf={opportunity.confidence:.1%}, Kelly={kelly_fraction:.1%}, Stop={exit_levels['stop_loss_pct']}% | Deep Research: {verif_reason}",
+            rationale=f"IMMEDIATE TRADE: Edge={opportunity.edge:.1%}, Conf={opportunity.confidence:.1%}, Kelly={kelly_fraction:.1%}, Stop={exit_levels.get('stop_loss_pct', 10):.1f}% | Deep Research: {verif_reason}",
             strategy="immediate_portfolio_optimization",
             
-            # Enhanced exit strategy using Grok4 recommendations
+            # Enhanced exit strategy using AI or Grok4 recommendations
             stop_loss_price=exit_levels['stop_loss_price'],
             take_profit_price=exit_levels['take_profit_price'],
             max_hold_hours=exit_levels['max_hold_hours'],
-            target_confidence_change=exit_levels['target_confidence_change']
+            target_confidence_change=exit_levels.get('target_confidence_change', settings.trading.confidence_decay_threshold)
         )
         
         # 🚨 VALIDATE MARKET IS STILL TRADEABLE before executing
@@ -1458,11 +1483,12 @@ async def _verify_with_deep_research(
     opportunity: MarketOpportunity,
     db_manager: DatabaseManager,
     kalshi_client: KalshiClient,
-    xai_client: XAIClient
-) -> Tuple[bool, str]:
+    xai_client: Union[XAIClient, EnhancedAIClient],
+    ensemble_coordinator: Optional[EnsembleCoordinator] = None
+) -> Tuple[bool, str, Optional[Any]]:
     """
     Perform a deep research verification for a potential trade.
-    Returns (approved, reason).
+    Returns (approved, reason, decision) where decision contains AI-recommended SL/TP.
     """
     try:
         # 1. Fetch full market details including recent news/activity if possible
@@ -1487,12 +1513,94 @@ async def _verify_with_deep_research(
         # Use existing news summary if we have it, or empty
         news_summary = "" 
         
-        decision = await xai_client.get_trading_decision(
-            market_data, 
-            portfolio_data, 
-            news_summary,
-            ml_prediction=None # Avoid biasing with same ML pred if possible, or pass it if trusted
-        )
+        decision = None
+        
+        decision = None
+        
+        # 1.5. CHECK ENSEMBLE COORDINATOR (Highest Priority)
+        # If we have the ensemble coordinator, use it to get a multi-model consensus
+        if ensemble_coordinator and settings.trading.enable_ensemble_mode:
+            try:
+                logging.getLogger("deep_research").info(f"🧠 Requesting ENSEMBLE decision for {opportunity.market_id}...")
+                ensemble_decision = await ensemble_coordinator.get_ensemble_decision(
+                    market_data=market_data,
+                    portfolio_data=portfolio_data,
+                    news_summary=news_summary
+                )
+                
+                if ensemble_decision and ensemble_decision.action == "BUY":
+                    logging.getLogger("deep_research").info(f"✅ ENSEMBLE APPROVED: {ensemble_decision.side} ({ensemble_decision.confidence:.1%})")
+                    
+                    # Convert to TradingDecision format if needed or just use it
+                    # The ensemble decision structure is compatible or we can wrap it
+                    from src.clients.xai_client import TradingDecision
+                    decision = TradingDecision(
+                        action=ensemble_decision.action,
+                        side=ensemble_decision.side,
+                        confidence=ensemble_decision.confidence,
+                        limit_price=None,
+                        reasoning=f"Ensemble Consensus ({ensemble_decision.vote_breakdown}): {ensemble_decision.reasoning}",
+                        stop_loss_cents=getattr(ensemble_decision, 'stop_loss_cents', None),
+                        take_profit_cents=getattr(ensemble_decision, 'take_profit_cents', None)
+                    )
+                else:
+                    logging.getLogger("deep_research").warning(f"Ensemble Result: {ensemble_decision.action if ensemble_decision else 'None'}. Falling back/Skipping.")
+                    
+            except Exception as e:
+                logging.getLogger("deep_research").error(f"Failed to use Ensemble Coordinator: {e}")
+
+        # Check if Dual AI is enabled (secondary check if Ensemble not used/failed)
+        if not decision and settings.trading.enable_dual_ai_mode:
+            try:
+                from src.intelligence.dual_ai_engine import DualAIDecisionEngine
+                from src.clients.openai_client import OpenAIClient
+                
+                openai_client = None
+                if settings.api.openai_api_key:
+                    openai_client = OpenAIClient(api_key=settings.api.openai_api_key)
+                
+                if openai_client:
+                    dual_engine = DualAIDecisionEngine(
+                        xai_client=xai_client,
+                        openai_client=openai_client,
+                        db_manager=db_manager
+                    )
+                    
+                    logging.getLogger("deep_research").info(f"🕵️ Using Dual AI Engine (Grok+GPT) for deep research on {opportunity.market_id}")
+                    
+                    dual_result = await dual_engine.get_dual_ai_decision(
+                        market_data,
+                        portfolio_data,
+                        news_summary
+                    )
+                    
+                    if dual_result and dual_result.final_action == "BUY":
+                         # Construct TradingDecision from DualAIDecision fields
+                         # note: DualAIDecision stores result in flat fields (final_action, final_side, etc.)
+                         from src.clients.xai_client import TradingDecision # Ensure import
+                         
+                         decision = TradingDecision(
+                             action=dual_result.final_action,
+                             side=dual_result.final_side,
+                             confidence=dual_result.final_confidence,
+                             limit_price=None,
+                             reasoning=dual_result.dual_ai_reasoning
+                         )
+                         logging.getLogger("deep_research").info(f"✅ Dual AI Consensus: {decision.action} {decision.side} ({decision.confidence:.1%})")
+                    else:
+                         logging.getLogger("deep_research").warning(f"Dual AI Result: {dual_result.final_action if dual_result else 'None'}. Falling back/Skipping.")
+                         
+            except Exception as e:
+                logging.getLogger("deep_research").error(f"Failed to use Dual AI: {e}")
+
+        # Fallback to standard XAI client if Dual AI disabled, failed, or skipped
+        if not decision:
+            decision = await xai_client.get_trading_decision(
+                market_data, 
+                portfolio_data, 
+                news_summary,
+                ml_prediction=None # Avoid biasing with same ML pred if possible, or pass it if trusted
+            )
         
         if not decision:
             # AI unavailable (rate limit, cost limit, etc.) - allow trade to proceed
@@ -1500,36 +1608,36 @@ async def _verify_with_deep_research(
             logging.getLogger("deep_research").warning(
                 f"Deep research unavailable for {opportunity.market_id} - proceeding with initial analysis"
             )
-            return True, "Deep research unavailable - proceeding with initial edge analysis"
+            return True, "Deep research unavailable - proceeding with initial edge analysis", None
             
         # 3. Compare with our opportunistic decision
         intended_side = "NO" if opportunity.edge < 0 else "YES"
         
         if decision.action != "BUY":
-            return False, f"Deep research recommends {decision.action} instead of BUY"
+            return False, f"Deep research recommends {decision.action} instead of BUY", decision
             
         if decision.side != intended_side:
-            return False, f"Deep research recommends {decision.side}, but we wanted {intended_side}"
+            return False, f"Deep research recommends {decision.side}, but we wanted {intended_side}", decision
             
         if decision.confidence < 0.6: # High bar for confirmation
-            return False, f"Deep research confidence {decision.confidence:.1%} too low (<60%)"
+            return False, f"Deep research confidence {decision.confidence:.1%} too low (<60%)", decision
             
         # 4. Special Check: 99% Probability Trap
         # If AI says BUY YES at 99c, it better be 100% sure.
         if intended_side == "YES" and opportunity.market_probability > 0.95:
              if decision.confidence < 0.95:
-                 return False, f"Buying {intended_side} at >95% prob requires >95% confidence (got {decision.confidence:.1%})"
+                 return False, f"Buying {intended_side} at >95% prob requires >95% confidence (got {decision.confidence:.1%})", decision
                  
         if intended_side == "NO" and opportunity.market_probability < 0.05:
              # Selling NO at 5c is buying NO at 95%
              if decision.confidence < 0.95:
-                 return False, f"Buying {intended_side} (short YES) at \u003c5% prob requires >95% confidence (got {decision.confidence:.1%})"
+                 return False, f"Buying {intended_side} (short YES) at \u003c5% prob requires >95% confidence (got {decision.confidence:.1%})", decision
 
-        return True, f"Confirmed {intended_side} with {decision.confidence:.1%} confidence. Reasoning: {decision.reasoning[:100]}..."
+        return True, f"Confirmed {intended_side} with {decision.confidence:.1%} confidence. Reasoning: {decision.reasoning[:100]}...", decision
         
     except Exception as e:
         logging.getLogger("deep_research").error(f"Error in deep research: {e}")
-        return False, f"Deep research error: {str(e)}"
+        return False, f"Deep research error: {str(e)}", None
 
 def _calculate_simple_kelly(opportunity: MarketOpportunity) -> float:
     """Calculate simple Kelly fraction for immediate trading."""
@@ -1585,7 +1693,7 @@ async def _get_fast_ai_prediction(
         # Use AI analysis for portfolio optimization - higher tokens for reasoning models  
         response_text = await xai_client.get_completion(
             prompt,
-            max_tokens=3000,  # Higher for reasoning models like grok-4
+            max_tokens=settings.trading.ai_max_tokens,  # Use settings value
             temperature=0.1   # Low temperature for consistency
         )
         

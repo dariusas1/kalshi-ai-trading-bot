@@ -606,7 +606,7 @@ class AdvancedMarketMaker:
             # Use AI analysis for market making - higher tokens for reasoning models
             response = await self.xai_client.get_completion(
                 prompt, 
-                max_tokens=3000,  # Higher for reasoning models like grok-4
+                max_tokens=settings.trading.ai_max_tokens,  # Use settings value
                 temperature=0.1   # Lower for consistency
             )
             

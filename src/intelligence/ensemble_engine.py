@@ -97,7 +97,8 @@ class EnsembleEngine(TradingLoggerMixin):
         db_manager: DatabaseManager,
         performance_tracker: PerformanceTracker,
         model_selector: ModelSelector,
-        config: Optional[EnsembleConfig] = None
+        config: Optional[EnsembleConfig] = None,
+        clients: Optional[Dict[str, Any]] = None
     ):
         """
         Initialize ensemble engine.
@@ -107,11 +108,13 @@ class EnsembleEngine(TradingLoggerMixin):
             performance_tracker: Performance tracking system
             model_selector: Model selection engine
             config: Ensemble configuration
+            clients: Dictionary of client instances for interacting with models
         """
         self.db_manager = db_manager
         self.performance_tracker = performance_tracker
         self.model_selector = model_selector
         self.config = config or EnsembleConfig()
+        self.clients = clients or {}
 
         # Cache for model performance data
         self.performance_cache: Dict[str, float] = {}
@@ -470,29 +473,68 @@ class EnsembleEngine(TradingLoggerMixin):
         portfolio_data: Dict[str, Any]
     ) -> Optional[ModelPrediction]:
         """Get prediction from a specific model."""
-        # Mock implementation - would call actual model client
-        import random
+        import time
+        from src.clients.xai_client import TradingDecision
 
-        # Create mock decision
-        actions = ["BUY", "SKIP"]
-        sides = ["YES", "NO"]
+        start_time = time.time()
+        
+        try:
+            # Determine which client to use
+            client = None
+            if "grok" in model_name.lower():
+                client = self.clients.get("xai")
+            elif "gpt" in model_name.lower() or "o1" in model_name.lower():
+                client = self.clients.get("openai")
+            
+            # Fallback to xai (primary) if specific client not found but xai is available
+            if not client and "xai" in self.clients:
+                client = self.clients["xai"]
+                
+            if not client:
+                self.logger.warning(f"No client available for model {model_name}")
+                return None
 
-        decision = TradingDecision(
-            action=random.choice(actions),
-            side=random.choice(sides),
-            confidence=random.uniform(0.5, 0.95),
-            reasoning=f"Mock reasoning from {model_name}"
-        )
+            # Get decision from client
+            # Note: We rely on the client's get_trading_decision interface
+            # For specific models, we might need to set a context var or pass a param
+            # But XAIClient manages its own models, so we trust it for now for Grok
+            
+            decision = None
+            if "grok" in model_name.lower() and hasattr(client, 'get_trading_decision'):
+                # XAI Client
+                # TODO: Pass specific model requirement if XAIClient supports it per-call
+                decision = await client.get_trading_decision(
+                    market_data, portfolio_data, 
+                    news_summary=market_data.get("news_summary", "")
+                )
+            elif "gpt" in model_name.lower() and hasattr(client, 'get_trading_decision'):
+                # OpenAI Client
+                decision = await client.get_trading_decision(
+                    market_data, portfolio_data,
+                    news_summary=market_data.get("news_summary", "")
+                )
+                
+            if not decision:
+                return None
 
-        return ModelPrediction(
-            model_name=model_name,
-            decision=decision,
-            performance_score=random.uniform(0.6, 0.9),
-            confidence_calibration=random.uniform(0.8, 1.0),
-            response_time_ms=random.uniform(500, 2000),
-            cost_usd=random.uniform(0.01, 0.05),
-            weight=1.0
-        )
+            duration_ms = (time.time() - start_time) * 1000
+            
+            # Calculate mock cost if not provided (approximate)
+            cost = 0.01  # Placeholder, should get from client response if possible
+
+            return ModelPrediction(
+                model_name=model_name,
+                decision=decision,
+                performance_score=0.8, # Placeholder until we query tracker
+                confidence_calibration=1.0, # Placeholder
+                response_time_ms=duration_ms,
+                cost_usd=cost,
+                weight=1.0
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error getting prediction from {model_name}: {e}")
+            return None
 
     async def _apply_ensemble_strategy(
         self,

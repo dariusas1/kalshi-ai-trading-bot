@@ -504,6 +504,45 @@ class DatabaseManager(TradingLoggerMixin):
             )
         """)
         
+        # === PRODUCTION SAFETY TABLES ===
+        
+        # Idempotency key tracking (prevents duplicate orders on network retries)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS order_idempotency (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                idempotency_key TEXT UNIQUE NOT NULL,
+                market_id TEXT NOT NULL,
+                side TEXT NOT NULL,
+                action TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                order_id TEXT,
+                created_at TEXT NOT NULL,
+                response_json TEXT
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_idempotency_key ON order_idempotency(idempotency_key)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_idempotency_created ON order_idempotency(created_at)")
+        
+        # Circuit breaker state (global trading halt mechanism)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS circuit_breaker_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                is_paused BOOLEAN NOT NULL DEFAULT 0,
+                pause_reason TEXT,
+                paused_at TEXT,
+                hourly_loss REAL NOT NULL DEFAULT 0.0,
+                hourly_window_start TEXT,
+                manual_override BOOLEAN NOT NULL DEFAULT 0,
+                total_account_balance REAL NOT NULL DEFAULT 0.0
+            )
+        """)
+        
+        # Initialize circuit breaker state if not exists
+        await db.execute("""
+            INSERT OR IGNORE INTO circuit_breaker_state (id, is_paused, hourly_loss, hourly_window_start)
+            VALUES (1, 0, 0.0, datetime('now'))
+        """)
+        
         # Run migrations to ensure schema is up to date
         await self._run_migrations(db)
         
@@ -1359,6 +1398,156 @@ class DatabaseManager(TradingLoggerMixin):
         except Exception as e:
             self.logger.error(f"Error syncing with Kalshi: {e}")
             return {'error': str(e)}
+
+    # ==================== FILLS TO TRADE LOGS CONVERSION ====================
+
+    async def compute_pnl_from_fills(self) -> Dict[str, int]:
+        """
+        Compute P&L by matching buy/sell pairs from kalshi_fills 
+        and insert into trade_logs.
+        
+        Uses FIFO matching: earliest buys are matched with earliest sells.
+        Only creates trade_logs for completed round-trip trades.
+        
+        Returns:
+            Dict with 'trades_created' count and 'fills_processed' count
+        """
+        trades_created = 0
+        fills_processed = 0
+        
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                # Get all fills grouped by ticker, ordered by time
+                cursor = await db.execute("""
+                    SELECT * FROM kalshi_fills 
+                    ORDER BY ticker, created_time
+                """)
+                all_fills = await cursor.fetchall()
+                
+                if not all_fills:
+                    self.logger.info("📊 No kalshi_fills to process")
+                    return {'trades_created': 0, 'fills_processed': 0}
+                
+                # Group fills by ticker
+                fills_by_ticker = {}
+                for fill in all_fills:
+                    ticker = fill['ticker']
+                    if ticker not in fills_by_ticker:
+                        fills_by_ticker[ticker] = {'buys': [], 'sells': []}
+                    
+                    fill_dict = dict(fill)
+                    if fill['action'] == 'buy':
+                        fills_by_ticker[ticker]['buys'].append(fill_dict)
+                    elif fill['action'] == 'sell':
+                        fills_by_ticker[ticker]['sells'].append(fill_dict)
+                
+                # Check which fill_ids are already processed
+                cursor = await db.execute("""
+                    SELECT DISTINCT market_id, side, entry_timestamp FROM trade_logs
+                """)
+                existing_trades = set()
+                for row in await cursor.fetchall():
+                    existing_trades.add((row['market_id'], row['side'], row['entry_timestamp']))
+                
+                # Process each ticker
+                for ticker, fill_groups in fills_by_ticker.items():
+                    buys = fill_groups['buys']
+                    sells = fill_groups['sells']
+                    
+                    # Match buys with sells (FIFO)
+                    buy_idx = 0
+                    sell_idx = 0
+                    
+                    while buy_idx < len(buys) and sell_idx < len(sells):
+                        buy = buys[buy_idx]
+                        sell = sells[sell_idx]
+                        
+                        # Ensure buy happened before sell for valid P&L
+                        buy_time = buy.get('created_time', '')
+                        sell_time = sell.get('created_time', '')
+                        
+                        if buy_time > sell_time:
+                            # This sell was before this buy - skip this sell
+                            sell_idx += 1
+                            continue
+                        
+                        # Match quantity
+                        buy_remaining = buy.get('count', 0)
+                        sell_remaining = sell.get('count', 0)
+                        matched_qty = min(buy_remaining, sell_remaining)
+                        
+                        if matched_qty <= 0:
+                            buy_idx += 1
+                            continue
+                        
+                        # Get prices (in cents, convert to dollars)
+                        side = buy.get('side', 'yes').lower()
+                        if side == 'yes':
+                            entry_price = buy.get('yes_price', 0) / 100
+                            exit_price = sell.get('yes_price', 0) / 100
+                        else:
+                            entry_price = buy.get('no_price', 0) / 100
+                            exit_price = sell.get('no_price', 0) / 100
+                        
+                        # Calculate P&L
+                        pnl = (exit_price - entry_price) * matched_qty
+                        
+                        # Check for duplicate
+                        trade_key = (ticker, side.upper(), buy_time)
+                        if trade_key in existing_trades:
+                            # Already processed, move on
+                            buys[buy_idx]['count'] = buy_remaining - matched_qty
+                            sells[sell_idx]['count'] = sell_remaining - matched_qty
+                            if buys[buy_idx]['count'] <= 0:
+                                buy_idx += 1
+                            if sells[sell_idx]['count'] <= 0:
+                                sell_idx += 1
+                            continue
+                        
+                        # Insert into trade_logs
+                        try:
+                            await db.execute("""
+                                INSERT INTO trade_logs 
+                                (market_id, side, entry_price, exit_price, quantity, pnl, 
+                                 entry_timestamp, exit_timestamp, rationale, strategy)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (
+                                ticker,
+                                side.upper(),
+                                entry_price,
+                                exit_price,
+                                matched_qty,
+                                pnl,
+                                buy_time,
+                                sell_time,
+                                f"Auto-matched from fills (buy_id={buy.get('fill_id')}, sell_id={sell.get('fill_id')})",
+                                'kalshi_sync'
+                            ))
+                            trades_created += 1
+                            fills_processed += 2
+                            existing_trades.add(trade_key)
+                        except Exception as e:
+                            self.logger.debug(f"Could not insert trade for {ticker}: {e}")
+                        
+                        # Decrement remaining quantities
+                        buys[buy_idx]['count'] = buy_remaining - matched_qty
+                        sells[sell_idx]['count'] = sell_remaining - matched_qty
+                        
+                        if buys[buy_idx]['count'] <= 0:
+                            buy_idx += 1
+                        if sells[sell_idx]['count'] <= 0:
+                            sell_idx += 1
+                
+                await db.commit()
+                
+            self.logger.info(f"📊 Created {trades_created} trade_logs from {fills_processed} matched fills")
+            return {'trades_created': trades_created, 'fills_processed': fills_processed}
+            
+        except Exception as e:
+            self.logger.error(f"Error computing P&L from fills: {e}")
+            return {'trades_created': 0, 'fills_processed': 0, 'error': str(e)}
 
     # ==================== DASHBOARD ANALYTICS METHODS ====================
 
@@ -2636,3 +2825,229 @@ class DatabaseManager(TradingLoggerMixin):
         except Exception as e:
             self.logger.error(f"Error getting ensemble decisions: {e}")
             return []
+
+    # ==========================================================================
+    # === PRODUCTION SAFETY: IDEMPOTENCY KEY MANAGEMENT ===
+    # ==========================================================================
+
+    async def store_idempotency_key(
+        self,
+        idempotency_key: str,
+        market_id: str,
+        side: str,
+        action: str,
+        status: str = "pending"
+    ) -> bool:
+        """
+        Store an idempotency key before making an API call.
+        Returns True if stored successfully, False if key already exists (duplicate).
+        
+        This prevents duplicate orders on network retries.
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("""
+                    INSERT INTO order_idempotency 
+                    (idempotency_key, market_id, side, action, status, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (idempotency_key, market_id, side, action, status, datetime.now().isoformat()))
+                await db.commit()
+                self.logger.info(f"Idempotency key stored: {idempotency_key[:8]}... for {market_id}")
+                return True
+        except aiosqlite.IntegrityError:
+            # Key already exists - this is a duplicate request
+            self.logger.warning(f"🚫 Duplicate idempotency key blocked: {idempotency_key[:8]}... for {market_id}")
+            return False
+        except Exception as e:
+            self.logger.error(f"Error storing idempotency key: {e}")
+            return False
+
+    async def check_idempotency_key(self, idempotency_key: str) -> Optional[Dict[str, Any]]:
+        """
+        Check if an idempotency key was already used.
+        Returns the existing record if found, None otherwise.
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(
+                    "SELECT * FROM order_idempotency WHERE idempotency_key = ?",
+                    (idempotency_key,)
+                )
+                row = await cursor.fetchone()
+                if row:
+                    return dict(row)
+                return None
+        except Exception as e:
+            self.logger.error(f"Error checking idempotency key: {e}")
+            return None
+
+    async def update_idempotency_result(
+        self,
+        idempotency_key: str,
+        status: str,
+        order_id: Optional[str] = None,
+        response_json: Optional[str] = None
+    ) -> bool:
+        """
+        Update the result of an idempotency key after API response.
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("""
+                    UPDATE order_idempotency 
+                    SET status = ?, order_id = ?, response_json = ?
+                    WHERE idempotency_key = ?
+                """, (status, order_id, response_json, idempotency_key))
+                await db.commit()
+                return True
+        except Exception as e:
+            self.logger.error(f"Error updating idempotency result: {e}")
+            return False
+
+    async def cleanup_old_idempotency_keys(self, hours: int = 24) -> int:
+        """
+        Remove idempotency keys older than specified hours (TTL cleanup).
+        Returns count of deleted records.
+        """
+        try:
+            cutoff = (datetime.now() - timedelta(hours=hours)).isoformat()
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute(
+                    "SELECT COUNT(*) FROM order_idempotency WHERE created_at < ?",
+                    (cutoff,)
+                )
+                count = (await cursor.fetchone())[0]
+                
+                if count > 0:
+                    await db.execute(
+                        "DELETE FROM order_idempotency WHERE created_at < ?",
+                        (cutoff,)
+                    )
+                    await db.commit()
+                    self.logger.info(f"🧹 Cleaned up {count} old idempotency keys (TTL: {hours}h)")
+                return count
+        except Exception as e:
+            self.logger.error(f"Error cleaning up idempotency keys: {e}")
+            return 0
+
+    # ==========================================================================
+    # === PRODUCTION SAFETY: CIRCUIT BREAKER STATE MANAGEMENT ===
+    # ==========================================================================
+
+    async def get_circuit_breaker_state(self) -> Dict[str, Any]:
+        """
+        Get the current circuit breaker state.
+        Returns dict with is_paused, pause_reason, hourly_loss, etc.
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute("SELECT * FROM circuit_breaker_state WHERE id = 1")
+                row = await cursor.fetchone()
+                if row:
+                    return dict(row)
+                # Initialize if not exists
+                return {
+                    "is_paused": False,
+                    "pause_reason": None,
+                    "paused_at": None,
+                    "hourly_loss": 0.0,
+                    "hourly_window_start": datetime.now().isoformat(),
+                    "manual_override": False,
+                    "total_account_balance": 0.0
+                }
+        except Exception as e:
+            self.logger.error(f"Error getting circuit breaker state: {e}")
+            return {"is_paused": True, "pause_reason": f"Error reading state: {e}"}
+
+    async def set_circuit_breaker_paused(self, is_paused: bool, reason: str = None) -> bool:
+        """
+        Set the circuit breaker pause state.
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                if is_paused:
+                    await db.execute("""
+                        UPDATE circuit_breaker_state 
+                        SET is_paused = 1, pause_reason = ?, paused_at = ?
+                        WHERE id = 1
+                    """, (reason, datetime.now().isoformat()))
+                else:
+                    await db.execute("""
+                        UPDATE circuit_breaker_state 
+                        SET is_paused = 0, pause_reason = NULL, paused_at = NULL, 
+                            hourly_loss = 0.0, hourly_window_start = ?
+                        WHERE id = 1
+                    """, (datetime.now().isoformat(),))
+                await db.commit()
+                
+                if is_paused:
+                    self.logger.critical(f"🚨 CIRCUIT BREAKER ACTIVATED: {reason}")
+                else:
+                    self.logger.info("✅ Circuit breaker reset - trading resumed")
+                return True
+        except Exception as e:
+            self.logger.error(f"Error setting circuit breaker state: {e}")
+            return False
+
+    async def update_circuit_breaker_hourly_loss(
+        self, 
+        pnl_delta: float, 
+        account_balance: float
+    ) -> Dict[str, Any]:
+        """
+        Update hourly loss tracking. Resets window if hour has passed.
+        Returns updated state including whether circuit breaker should trip.
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute("SELECT * FROM circuit_breaker_state WHERE id = 1")
+                row = await cursor.fetchone()
+                state = dict(row) if row else {}
+                
+                # Check if we need to reset the hourly window
+                window_start_str = state.get("hourly_window_start")
+                if window_start_str:
+                    window_start = datetime.fromisoformat(window_start_str)
+                    if datetime.now() - window_start > timedelta(hours=1):
+                        # Reset hourly window
+                        await db.execute("""
+                            UPDATE circuit_breaker_state 
+                            SET hourly_loss = ?, hourly_window_start = ?, total_account_balance = ?
+                            WHERE id = 1
+                        """, (pnl_delta, datetime.now().isoformat(), account_balance))
+                        await db.commit()
+                        return {
+                            "hourly_loss": pnl_delta,
+                            "should_trip": False,
+                            "loss_pct": abs(pnl_delta) / account_balance if account_balance > 0 else 0
+                        }
+                
+                # Update hourly loss
+                new_hourly_loss = state.get("hourly_loss", 0.0) + pnl_delta
+                await db.execute("""
+                    UPDATE circuit_breaker_state 
+                    SET hourly_loss = ?, total_account_balance = ?
+                    WHERE id = 1
+                """, (new_hourly_loss, account_balance))
+                await db.commit()
+                
+                # Calculate loss percentage
+                loss_pct = abs(new_hourly_loss) / account_balance if account_balance > 0 and new_hourly_loss < 0 else 0
+                
+                return {
+                    "hourly_loss": new_hourly_loss,
+                    "should_trip": loss_pct >= 0.05,  # 5% threshold
+                    "loss_pct": loss_pct
+                }
+        except Exception as e:
+            self.logger.error(f"Error updating circuit breaker hourly loss: {e}")
+            return {"hourly_loss": 0, "should_trip": False, "loss_pct": 0}
+
+    async def reset_circuit_breaker(self) -> bool:
+        """
+        Manually reset the circuit breaker (operator intervention).
+        """
+        return await self.set_circuit_breaker_paused(False)

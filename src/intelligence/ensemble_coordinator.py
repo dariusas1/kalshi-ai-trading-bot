@@ -280,7 +280,7 @@ class EnsembleCoordinator(TradingLoggerMixin):
         self._model_selector = ModelSelector(self._performance_tracker)
 
         # Cost optimizer
-        self._cost_optimizer = CostOptimizer(self.db_manager)
+        self._cost_optimizer = CostOptimizer(self.db_manager, self._performance_tracker)
 
         self.logger.info("Core components initialized")
 

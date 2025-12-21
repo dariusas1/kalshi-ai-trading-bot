@@ -37,6 +37,11 @@ class AnalyticsProcessor:
         try:
             await self.db_manager.initialize()
             
+            # 0. Compute P&L from fills (convert kalshi_fills to trade_logs)
+            logger.info("Computing P&L from kalshi_fills...")
+            pnl_result = await self.db_manager.compute_pnl_from_fills()
+            logger.info(f"   Created {pnl_result.get('trades_created', 0)} trades from fills")
+            
             # 1. P&L by Period
             logger.info("Computing P&L by period...")
             periods = ['today', 'week', 'month', 'all']

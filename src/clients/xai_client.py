@@ -33,6 +33,8 @@ class TradingDecision:
     confidence: float  # 0.0 to 1.0
     limit_price: Optional[int] = None # The limit price for the order in cents.
     reasoning: Optional[str] = None   # Explanation for the decision
+    stop_loss_cents: Optional[int] = None  # AI-recommended stop loss price in cents
+    take_profit_cents: Optional[int] = None  # AI-recommended take profit price in cents
 
 
 @dataclass
@@ -376,16 +378,25 @@ class XAIClient(TradingLoggerMixin):
     
     def _create_search_prompt(self, query: str, max_length: int) -> str:
         """
-        Create an optimized search prompt for better results.
+        Create an optimized search prompt focused on prediction-market-relevant information.
         """
-        return f"""Find current, relevant information about: {query}
+        return f"""Find current, relevant information for prediction market analysis: {query}
 
-Focus on:
-- Recent news, data, or announcements
-- Factual information from reliable sources
-- Current conditions or forecasts if applicable
+PRIORITIZE (in order):
+1. **Resolution-relevant facts:** Official announcements, confirmed outcomes, authoritative sources
+2. **Base rate data:** Historical patterns, similar past situations, frequency statistics
+3. **Trader commentary:** What are prediction market traders saying? Any consensus views?
+4. **Recent developments:** News, announcements, or events from past 48 hours
+5. **Key actor signals:** Statements or actions from decision-makers
 
-Provide a brief, factual summary under {max_length//2} words. If no current information is available, clearly state that."""
+AVOID:
+- Speculation without factual basis
+- Outdated information (unless providing base rate context)
+- General background unless directly relevant
+
+Provide a brief, FACTUAL summary under {max_length//2} words. Focus on actionable intelligence for trading decisions.
+
+If no current information is available, clearly state that and provide only known base rate data if applicable."""
     
     def _process_search_response(self, response: Any, original_query: str, processing_time: float, max_length: int) -> str:
         """
@@ -786,13 +797,25 @@ Provide a brief, factual summary under {max_length//2} words. If no current info
             # Create model selector
             self._model_selector = ModelSelector(self._performance_tracker)
 
+            # Create clients dictionary for ensemble engine
+            clients = {"xai": self}
+            
+            # Try to add OpenAI client if configured
+            if config_settings.api.openai_api_key:
+                try:
+                    from src.clients.openai_client import OpenAIClient
+                    clients["openai"] = OpenAIClient(api_key=config_settings.api.openai_api_key)
+                except Exception as e:
+                    self.logger.warning(f"Failed to initialize OpenAI client for ensemble: {e}")
+
             # Create ensemble engine
             config = EnsembleConfig()
             self._ensemble_engine = EnsembleEngine(
                 self.db_manager,
                 self._performance_tracker,
                 self._model_selector,
-                config
+                config,
+                clients=clients
             )
 
             self._ensemble_engine_initialized = True
@@ -884,7 +907,7 @@ Provide a brief, factual summary under {max_length//2} words. If no current info
             messages = [{"role": "user", "content": prompt}]
             
             # Use appropriate token limits
-            max_tokens = 4000 if use_simplified else None  # Use default for full prompt
+            max_tokens = 4000 if use_simplified else settings.trading.ai_max_tokens
             
             response_text, cost = await self._make_completion_request(
                 messages=messages,
@@ -910,7 +933,8 @@ Provide a brief, factual summary under {max_length//2} words. If no current info
         ml_prediction: Optional[MLPrediction] = None
     ) -> str:
         """
-        Create a simplified, token-efficient prompt for trading decisions.
+        Create a simplified but rigorous prompt for trading decisions.
+        Includes essential checks while remaining token-efficient.
         """
         # technical analysis context
         ml_context = "No technical analysis available."
@@ -927,22 +951,44 @@ Provide a brief, factual summary under {max_length//2} words. If no current info
         # Truncate news summary to save tokens
         truncated_news = news_summary[:500] + "..." if len(news_summary) > 500 else news_summary
         
-        # Create concise prompt
-        prompt = f"""Analyze this prediction market and decide whether to trade.
+        # Create concise but rigorous prompt
+        prompt = f"""Analyze this prediction market with essential checks before trading.
 
-Market: {title}
-YES: {yes_price}¢ | NO: {no_price}¢ | Volume: ${volume:,.0f}
+**Market:** {title}
+**YES:** {yes_price}¢ | **NO:** {no_price}¢ | **Volume:** ${volume:,.0f}
 
-News: {truncated_news}
-Technical: {ml_context}
+**News:** {truncated_news}
+**Technical:** {ml_context}
 
-Rules:
-- Only trade if you have >10% edge (your probability - market price)
-- High confidence (>60%) required
-- Return JSON only
+---
+## QUICK ANALYSIS (Answer each briefly)
 
-Required format:
-{{"action": "BUY|SKIP", "side": "YES|NO", "limit_price": 1-99, "confidence": 0.0-1.0, "reasoning": "brief explanation"}}"""
+1. **Resolution Clarity:** What exactly triggers YES vs NO?
+
+2. **Base Rate:** What happens in similar situations historically?
+
+3. **Your Probability:** [X]% (commit BEFORE comparing to market price)
+
+4. **Edge (ONE SENTENCE):** "My edge is: ___"
+   - If you can't articulate a specific edge, SKIP
+
+5. **Steel-Man Opposite:** Best argument AGAINST your position?
+
+6. **Bias Check:** Am I overconfident or cherry-picking evidence?
+
+---
+## TRADING RULES
+- Only trade if Edge > 10% (Your prob - Market price > 10%)
+- Confidence must be > 60%
+- Specify stop_loss_cents (7-10% below entry) and take_profit_cents (15-25% above)
+- If unsure or no clear edge: SKIP
+- "I disagree with the market" is NOT an edge
+
+---
+## JSON RESPONSE ONLY:
+```json
+{{"action": "BUY|SKIP", "side": "YES|NO", "limit_price": int, "confidence": float, "stop_loss_cents": int, "take_profit_cents": int, "edge_statement": "one sentence edge", "reasoning": "brief explanation covering resolution, base rate, and your edge"}}
+```"""
         
         return prompt
 
@@ -1029,12 +1075,41 @@ Required format:
             limit_price = int(decision_data.get('limit_price', 50))
             reasoning = decision_data.get('reasoning', 'No reasoning provided')
             
+            # Extract AI-recommended stop loss and take profit (NEW)
+            stop_loss_cents = decision_data.get('stop_loss_cents')
+            take_profit_cents = decision_data.get('take_profit_cents')
+            
+            # Validate and convert to int if present
+            if stop_loss_cents is not None:
+                try:
+                    stop_loss_cents = int(stop_loss_cents)
+                    if stop_loss_cents < 1 or stop_loss_cents > 99:
+                        self.logger.warning(f"Invalid stop_loss_cents {stop_loss_cents}, ignoring")
+                        stop_loss_cents = None
+                except (ValueError, TypeError):
+                    stop_loss_cents = None
+                    
+            if take_profit_cents is not None:
+                try:
+                    take_profit_cents = int(take_profit_cents)
+                    if take_profit_cents < 1 or take_profit_cents > 99:
+                        self.logger.warning(f"Invalid take_profit_cents {take_profit_cents}, ignoring")
+                        take_profit_cents = None
+                except (ValueError, TypeError):
+                    take_profit_cents = None
+            
+            # Log if AI provided stop loss/take profit
+            if stop_loss_cents or take_profit_cents:
+                self.logger.info(f"🎯 AI Risk Levels: SL={stop_loss_cents}¢, TP={take_profit_cents}¢")
+            
             return TradingDecision(
                 action=action,
                 side=side,
                 confidence=confidence,
                 limit_price=limit_price,
-                reasoning=reasoning
+                reasoning=reasoning,
+                stop_loss_cents=stop_loss_cents,
+                take_profit_cents=take_profit_cents
             )
             
         except Exception as e:
@@ -1210,8 +1285,8 @@ Required format:
                             continue
                         else:
                             # If we've exhausted token scaling, try fallback model
-                            if model_to_use == "grok-4" and attempt == max_retries - 1:
-                                self.logger.warning(f"Grok-4 consistently hitting token limits, trying fallback model")
+                            if model_to_use == settings.trading.primary_model and attempt == max_retries - 1:
+                                self.logger.warning(f"{settings.trading.primary_model} consistently hitting token limits, trying fallback model")
                                 fallback_result = await self._try_fallback_model(messages, temperature, original_max_tokens)
                                 if fallback_result:
                                     return fallback_result

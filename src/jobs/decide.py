@@ -5,13 +5,14 @@ Trading decision job - analyzes markets and generates trading decisions.
 import asyncio
 import time
 import numpy as np
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Union
 from datetime import datetime
 
 from src.utils.database import DatabaseManager, Market, Position
 from src.config.settings import settings
 from src.utils.logging_setup import get_trading_logger
 from src.clients.xai_client import XAIClient
+from src.intelligence.enhanced_client import EnhancedAIClient
 from src.clients.kalshi_client import KalshiClient
 
 logger = get_trading_logger("decision_helpers")
@@ -62,7 +63,7 @@ def _calculate_dynamic_quantity(
 async def make_decision_for_market(
     market: Market,
     db_manager: DatabaseManager,
-    xai_client: XAIClient,
+    xai_client: Union[XAIClient, EnhancedAIClient],
     kalshi_client: KalshiClient,
 ) -> Optional[Position]:
     """
@@ -263,58 +264,122 @@ async def make_decision_for_market(
         max_investment_possible = (available_balance * settings.trading.max_position_size_pct) / 100
         is_high_stakes = max_investment_possible >= settings.trading.ensemble_cascading_medium_value_threshold
 
-        # Enhanced ensemble decision logic with confidence and uncertainty handling
-        if settings.multi_model_ensemble and is_high_stakes:
-            logger.info(f"Using enhanced multi-model ensemble for high-stakes market (max potential: ${max_investment_possible:.2f})")
-
-            # Try advanced ensemble first, fall back to basic ensemble if needed
+        # === DUAL-AI MODE: Grok Forecaster + GPT Critic ===
+        # Use dual-AI for higher quality decisions when enabled
+        use_dual_ai = (
+            settings.trading.enable_dual_ai_mode and
+            max_investment_possible >= settings.trading.dual_ai_min_trade_value and
+            (not settings.trading.dual_ai_use_for_high_stakes_only or is_high_stakes)
+        )
+        
+        decision = None
+        
+        if use_dual_ai:
+            logger.info(f"🔮 [DUAL-AI] Using Grok Forecaster + GPT Critic for {market.market_id}")
+            
             try:
-                decision = await xai_client.get_advanced_ensemble_decision(
+                from src.intelligence.dual_ai_engine import DualAIDecisionEngine
+                from src.clients.openai_client import OpenAIClient
+                from src.clients.xai_client import TradingDecision
+                
+                # Initialize dual-AI engine
+                openai_client = OpenAIClient()
+                dual_engine = DualAIDecisionEngine(
+                    xai_client=xai_client,
+                    openai_client=openai_client,
+                    db_manager=db_manager
+                )
+                
+                dual_decision = await dual_engine.get_dual_ai_decision(
                     market_data=market_data,
                     portfolio_data=portfolio_data,
-                    news_summary=news_summary,
-                    trade_value=max_investment_possible,
-                    strategy="cascading"  # Use cascading strategy for high-stakes
+                    news_summary=news_summary
                 )
+                
+                if dual_decision:
+                    total_analysis_cost += dual_decision.total_cost
+                    
+                    if dual_decision.review.approved and dual_decision.final_action == "BUY":
+                        # Convert dual-AI decision to standard TradingDecision format
+                        decision = TradingDecision(
+                            action=dual_decision.final_action,
+                            side=dual_decision.final_side,
+                            confidence=dual_decision.final_confidence,
+                            limit_price=int(market_data.get('yes_price', 50) if dual_decision.final_side == 'YES' else market_data.get('no_price', 50)),
+                            reasoning=dual_decision.dual_ai_reasoning
+                        )
+                        logger.info(f"✅ [DUAL-AI] Trade APPROVED: {decision.action} {decision.side} @ {decision.confidence:.1%}")
+                    else:
+                        # Critic rejected or forecaster said skip
+                        rejection_reason = dual_decision.review.critique if dual_decision else "No dual-AI decision"
+                        logger.info(f"🚫 [DUAL-AI] Trade REJECTED: {rejection_reason[:100]}...")
+                        await db_manager.record_market_analysis(
+                            market.market_id, "DUAL_AI_REJECTED", 0.0, total_analysis_cost, rejection_reason[:200]
+                        )
+                        # Continue with standard decision flow as fallback
+                        decision = None
+                else:
+                    logger.warning(f"⚠️ [DUAL-AI] No decision returned, falling back to standard flow")
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ [DUAL-AI] Error: {e}, falling back to standard decision flow")
+                import traceback
+                logger.debug(traceback.format_exc())
+        
+        # === FALLBACK: Standard ensemble/single-model decision ===
+        if decision is None:
+            # Enhanced ensemble decision logic with confidence and uncertainty handling
+            if settings.multi_model_ensemble and is_high_stakes:
+                logger.info(f"Using enhanced multi-model ensemble for high-stakes market (max potential: ${max_investment_possible:.2f})")
 
-                # If advanced ensemble failed, try basic ensemble
-                if decision is None:
-                    logger.info(f"Advanced ensemble returned None, trying basic ensemble")
+                # Try advanced ensemble first, fall back to basic ensemble if needed
+                try:
+                    decision = await xai_client.get_advanced_ensemble_decision(
+                        market_data=market_data,
+                        portfolio_data=portfolio_data,
+                        news_summary=news_summary,
+                        trade_value=max_investment_possible,
+                        strategy="cascading"  # Use cascading strategy for high-stakes
+                    )
+
+                    # If advanced ensemble failed, try basic ensemble
+                    if decision is None:
+                        logger.info(f"Advanced ensemble returned None, trying basic ensemble")
+                        decision = await xai_client.get_ensemble_decision(
+                            market_data=market_data,
+                            portfolio_data=portfolio_data,
+                            news_summary=news_summary,
+                            min_consensus_confidence=0.65  # Slightly stricter for high-stakes
+                        )
+
+                except Exception as e:
+                    logger.warning(f"Advanced ensemble failed: {e}, falling back to basic ensemble")
                     decision = await xai_client.get_ensemble_decision(
                         market_data=market_data,
                         portfolio_data=portfolio_data,
                         news_summary=news_summary,
-                        min_consensus_confidence=0.65  # Slightly stricter for high-stakes
+                        min_consensus_confidence=0.65
                     )
 
-            except Exception as e:
-                logger.warning(f"Advanced ensemble failed: {e}, falling back to basic ensemble")
-                decision = await xai_client.get_ensemble_decision(
-                    market_data=market_data,
-                    portfolio_data=portfolio_data,
-                    news_summary=news_summary,
-                    min_consensus_confidence=0.65
-                )
-
-        else:
-            # For low-value trades, use single model or basic ensemble if available
-            if (settings.multi_model_ensemble and
-                max_investment_possible >= settings.trading.ensemble_cascading_low_value_threshold):
-                # Use basic ensemble for medium-value trades
-                logger.info(f"Using basic ensemble for medium-value trade (max potential: ${max_investment_possible:.2f})")
-                decision = await xai_client.get_ensemble_decision(
-                    market_data=market_data,
-                    portfolio_data=portfolio_data,
-                    news_summary=news_summary,
-                    min_consensus_confidence=0.60  # Standard confidence threshold
-                )
             else:
-                # Use single model for low-value trades
-                decision = await xai_client.get_trading_decision(
-                    market_data=market_data,
-                    portfolio_data=portfolio_data,
-                    news_summary=news_summary,
-                )
+                # For low-value trades, use single model or basic ensemble if available
+                if (settings.multi_model_ensemble and
+                    max_investment_possible >= settings.trading.ensemble_cascading_low_value_threshold):
+                    # Use basic ensemble for medium-value trades
+                    logger.info(f"Using basic ensemble for medium-value trade (max potential: ${max_investment_possible:.2f})")
+                    decision = await xai_client.get_ensemble_decision(
+                        market_data=market_data,
+                        portfolio_data=portfolio_data,
+                        news_summary=news_summary,
+                        min_consensus_confidence=0.60  # Standard confidence threshold
+                    )
+                else:
+                    # Use single model for low-value trades
+                    decision = await xai_client.get_trading_decision(
+                        market_data=market_data,
+                        portfolio_data=portfolio_data,
+                        news_summary=news_summary,
+                    )
 
         # Estimate decision cost (this should come from the XAI client in the future)
         estimated_decision_cost = 0.015  # Rough estimate

@@ -37,19 +37,26 @@ class TradingConfig:
     min_balance: float = 25.0           # REDUCED: Lower minimum to trade more (was 100)
     live_trading_enabled: bool = field(default_factory=lambda: _env_flag("LIVE_TRADING_ENABLED", "false"))
     
-    # Market filtering criteria - MUCH MORE PERMISSIVE
+    # Market filtering criteria - STRICT TIME LIMITS
     min_volume: float = 750.0            # Minimum volume to consider market
-    max_time_to_expiry_days: int = 14    # INCREASED: Allow longer timeframes (was 14, now 30)
+    max_time_to_expiry_days: int = 1     # STRICT: Only trade markets expiring within 24 hours
+    max_market_expiry_hours: int = 24    # NEW: Maximum market expiry in hours for clarity
     
     # AI decision making - MORE AGGRESSIVE THRESHOLDS
     min_confidence_to_trade: float = 0.55   # REDUCED: 55% minimum AI confidence to trade (was 65%)
     scan_interval_seconds: int = 90      # Scan markets every 90 seconds
     
     # AI model configuration
-    primary_model: str = "grok-4" # DO NOT CHANGE THIS UNDER ANY CIRCUMSTANCES
+    primary_model: str = "grok-4.1" # DO NOT CHANGE THIS UNDER ANY CIRCUMSTANCES
     fallback_model: str = "grok-3"  # Fallback to available model
     ai_temperature: float = 0  # Lower temperature for more consistent JSON output
     ai_max_tokens: int = 8000    # Reasonable limit for reasoning models (grok-4 works better with 8000)
+    
+    # Enhanced AI Client settings
+    ai_timeout: float = 45.0
+    ai_max_retries: int = 3
+    xai_models: List[str] = field(default_factory=lambda: ["grok-4.1", "grok-3"])
+    openai_models: List[str] = field(default_factory=lambda: ["gpt-4", "gpt-3.5-turbo"])
     
     # Position sizing (LEGACY - now using Kelly-primary approach)
     default_position_size: float = 3.0  # REDUCED: Now using Kelly Criterion as primary method (was 5%, now 3%)
@@ -186,7 +193,7 @@ class TradingConfig:
     profit_threshold: float = 0.15
     loss_threshold: float = 0.08
     confidence_decay_threshold: float = 0.25
-    max_hold_time_hours: int = 72
+    max_hold_time_hours: int = 24         # STRICT: Max 24 hours hold time
     volatility_adjustment: bool = True
 
     # === POSITION LIMITS ===
@@ -258,6 +265,26 @@ class TradingConfig:
     ensemble_enable_uncertainty_quantification: bool = True # Quantify decision uncertainty
     ensemble_enable_contribution_analysis: bool = True   # Track individual model contributions
 
+    # === CIRCUIT BREAKER SETTINGS (Production Safety) ===
+    circuit_breaker_enabled: bool = True  # Master switch for circuit breaker
+    circuit_breaker_hourly_loss_pct: float = 0.05  # 5% hourly loss triggers global pause
+    circuit_breaker_require_manual_reset: bool = True  # Require operator to reset after trip
+    circuit_breaker_cooldown_minutes: int = 60  # Hourly window duration
+
+    # === EXPIRATION RISK MANAGEMENT (Production Safety) ===
+    auto_exit_expiring_enabled: bool = True  # Auto-close positions near expiry
+    auto_exit_minutes_before_expiry: int = 30  # Close positions 30 minutes before market close
+
+    # === DUAL-AI CONFIGURATION (Grok Forecaster + GPT Critic) ===
+    # Two-stage AI decision system: Grok researches/predicts, GPT validates before trading
+    enable_dual_ai_mode: bool = True                    # Enable Grok forecaster + GPT critic system
+    dual_ai_min_trade_value: float = 5.0                # Minimum trade value to use dual-AI ($5)
+    dual_ai_critic_must_approve: bool = True            # Critic must approve for trade to execute
+    dual_ai_max_cost_per_decision: float = 0.12         # Max combined cost for dual-AI analysis
+    dual_ai_min_agreement_score: float = 0.6            # Minimum critic agreement score to approve
+    dual_ai_skip_critic_for_skip: bool = True           # Skip GPT critic if Grok says SKIP (saves cost)
+    dual_ai_use_for_high_stakes_only: bool = False      # Only use dual-AI for high-value trades
+
 
 @dataclass
 class LoggingConfig:
@@ -308,7 +335,7 @@ use_dynamic_exits: bool = True
 profit_threshold: float = 0.15          # DECREASED: Take profits sooner (was 0.25, now 0.20)
 loss_threshold: float = 0.08            # INCREASED: Allow larger losses (was 0.10, now 0.15)
 confidence_decay_threshold: float = 0.25  # INCREASED: Allow more confidence decay (was 0.20, now 0.25)
-max_hold_time_hours: int = 72          # INCREASED: Hold longer (was 168, now 240 hours = 10 days)
+max_hold_time_hours: int = 24          # STRICT: Max 24 hours hold time to limit exposure
 volatility_adjustment: bool = True      # Adjust exits based on volatility
 
 # === MARKET MAKING STRATEGY ===
