@@ -42,7 +42,7 @@ from src.config.settings import settings
 
 # Import Beast Mode components
 from src.strategies.unified_trading_system import run_unified_trading_system, TradingSystemConfig
-from beast_mode_dashboard import BeastModeDashboard
+# NOTE: BeastModeDashboard is imported lazily in run_dashboard_mode() to avoid import errors on Railway
 
 
 class BeastModeBot:
@@ -79,6 +79,8 @@ class BeastModeBot:
     async def run_dashboard_mode(self):
         """Run in live dashboard mode with real-time updates."""
         try:
+            # Lazy import to avoid startup failures when not in dashboard mode
+            from beast_mode_dashboard import BeastModeDashboard
             self.logger.info("🚀 Starting Beast Mode Dashboard Mode")
             dashboard = BeastModeDashboard()
             await dashboard.show_live_dashboard()
