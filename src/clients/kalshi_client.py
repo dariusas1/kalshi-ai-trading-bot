@@ -79,12 +79,32 @@ class KalshiClient(TradingLoggerMixin):
             if private_key_env:
                 self.logger.info(f"KALSHI_PRIVATE_KEY found, length: {len(private_key_env)}")
 
-                # Remove any surrounding whitespace or newlines
+                # Remove any surrounding whitespace
                 private_key_env = private_key_env.strip()
+                
+                # Handle Railway-style escaped newlines (\n as literal characters)
+                # Railway environment variables often have literal \n instead of actual newlines
+                if '\\n' in private_key_env:
+                    self.logger.info("Converting escaped newlines (\\n) to actual newlines")
+                    private_key_env = private_key_env.replace('\\n', '\n')
+                
+                # Also handle case where newlines are completely missing
+                # PEM format: -----BEGIN PRIVATE KEY-----<base64>-----END PRIVATE KEY-----
+                if '-----BEGIN PRIVATE KEY-----' in private_key_env and '\n' not in private_key_env:
+                    self.logger.info("Reconstructing PEM format with proper newlines")
+                    # Extract the base64 content between headers
+                    import re
+                    match = re.match(r'-----BEGIN PRIVATE KEY-----(.*?)-----END PRIVATE KEY-----', private_key_env, re.DOTALL)
+                    if match:
+                        base64_content = match.group(1).strip()
+                        # Split into 64-character lines (PEM standard)
+                        lines = [base64_content[i:i+64] for i in range(0, len(base64_content), 64)]
+                        private_key_env = '-----BEGIN PRIVATE KEY-----\n' + '\n'.join(lines) + '\n-----END PRIVATE KEY-----'
 
                 # Check if it looks like a PEM key
                 if not private_key_env.startswith('-----BEGIN PRIVATE KEY-----'):
                     self.logger.error("KALSHI_PRIVATE_KEY does not appear to be in PEM format")
+                    self.logger.error(f"Key starts with: {private_key_env[:50]}...")
                     raise KalshiAPIError("KALSHI_PRIVATE_KEY is not in valid PEM format")
 
                 # Convert to bytes
