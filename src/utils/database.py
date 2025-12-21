@@ -1311,19 +1311,27 @@ class DatabaseManager(TradingLoggerMixin):
         try:
             # Get positions from Kalshi
             response = await kalshi_client.get_positions()
+            self.logger.info(f"🔍 Kalshi positions response keys: {list(response.keys()) if response else 'None'}")
+            
             kalshi_positions = (
                 response.get('market_positions')
                 or response.get('positions')
                 or []
             )
+            self.logger.info(f"🔍 Found {len(kalshi_positions)} positions in Kalshi response")
             
             # Build set of active Kalshi positions (tickers with non-zero quantity)
             kalshi_active = set()
             for pos in kalshi_positions:
                 ticker = pos.get('ticker') or pos.get('market_id', '')
-                position_qty = pos.get('position', pos.get('quantity', 0))
+                # Kalshi API uses 'position' for quantity in market_positions
+                position_qty = pos.get('position', 0)
+                if position_qty == 0:
+                    position_qty = pos.get('quantity', 0)
+                    
                 if abs(position_qty) > 0:
                     kalshi_active.add(ticker)
+                    self.logger.debug(f"  Active position: {ticker} qty={position_qty}")
             
             # Get local open positions
             local_positions = await self.get_open_positions()

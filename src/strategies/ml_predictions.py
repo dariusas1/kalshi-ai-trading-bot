@@ -64,6 +64,11 @@ class MLPricePredictor:
         Generate price prediction for a market.
         """
         try:
+            # Guard against missing kalshi_client
+            if self.kalshi_client is None:
+                self.logger.warning(f"Cannot predict for {market_id}: kalshi_client is None")
+                return None
+            
             # Check cache
             if market_id in self._prediction_cache:
                 pred = self._prediction_cache[market_id]

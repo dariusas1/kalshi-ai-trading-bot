@@ -1495,7 +1495,12 @@ async def _verify_with_deep_research(
         )
         
         if not decision:
-            return False, "AI failed to generate a decision"
+            # AI unavailable (rate limit, cost limit, etc.) - allow trade to proceed
+            # The initial fast analysis already passed, so we trust that decision
+            logging.getLogger("deep_research").warning(
+                f"Deep research unavailable for {opportunity.market_id} - proceeding with initial analysis"
+            )
+            return True, "Deep research unavailable - proceeding with initial edge analysis"
             
         # 3. Compare with our opportunistic decision
         intended_side = "NO" if opportunity.edge < 0 else "YES"

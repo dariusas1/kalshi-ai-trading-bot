@@ -14,6 +14,15 @@ Key Features:
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
 import math
+import logging
+
+# Module-level stats tracking for diagnostic purposes
+_filter_stats = {
+    'passed': 0,
+    'rejected': 0,
+    'last_summary_at': 0
+}
+_logger = logging.getLogger("edge_filter")
 
 
 @dataclass
@@ -123,6 +132,22 @@ class EdgeFilter:
         else:
             passes_filter = True
             reason = f"Meets requirements: {edge_percentage:.1%} edge, {confidence:.1%} confidence"
+        
+        # Update stats tracking
+        if passes_filter:
+            _filter_stats['passed'] += 1
+        else:
+            _filter_stats['rejected'] += 1
+        
+        # Log summary every 20 decisions
+        total_decisions = _filter_stats['passed'] + _filter_stats['rejected']
+        if total_decisions > 0 and total_decisions % 20 == 0 and total_decisions != _filter_stats['last_summary_at']:
+            _filter_stats['last_summary_at'] = total_decisions
+            pass_rate = _filter_stats['passed'] / total_decisions * 100
+            _logger.info(
+                f"📊 Edge filter stats: {_filter_stats['passed']} passed, "
+                f"{_filter_stats['rejected']} rejected ({pass_rate:.1f}% pass rate)"
+            )
         
         return EdgeFilterResult(
             passes_filter=passes_filter,

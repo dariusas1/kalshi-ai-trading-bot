@@ -139,11 +139,24 @@ class AdvancedMarketMaker:
         opportunities = []
         sizing_capital = available_capital or await self._get_available_capital()
         
+        # Diagnostic tracking
+        rejection_reasons = {
+            'no_market_data': 0,
+            'extreme_prices': 0,
+            'no_ai_analysis': 0,
+            'insufficient_edge': 0,
+            'no_profit_potential': 0,
+            'errors': 0
+        }
+        
+        self.logger.info(f"🔍 Analyzing {len(markets)} markets for market making opportunities")
+        
         for market in markets:
             try:
                 # Get current market data
                 market_data = await self.kalshi_client.get_market(market.market_id)
                 if not market_data:
+                    rejection_reasons['no_market_data'] += 1
                     continue
                     
                 market_info = market_data.get('market', {})
@@ -152,11 +165,13 @@ class AdvancedMarketMaker:
                 
                 # Skip if prices are extreme (hard to make markets) - STRICTER thresholds to avoid 99% bets
                 if current_yes_price < 0.05 or current_yes_price > 0.95:
+                    rejection_reasons['extreme_prices'] += 1
                     continue
                 
                 # Get AI prediction for edge calculation
                 analysis = await self._get_ai_analysis(market)
                 if not analysis:
+                    rejection_reasons['no_ai_analysis'] += 1
                     continue
                     
                 ai_prob = analysis.get('probability', 0.5)
@@ -179,12 +194,20 @@ class AdvancedMarketMaker:
                     if opportunity and opportunity.total_expected_profit > 0:
                         opportunities.append(opportunity)
                         self.logger.info(f"✅ MARKET MAKING APPROVED: {market.market_id} - YES edge: {yes_edge_result.edge_percentage:.1%}, NO edge: {no_edge_result.edge_percentage:.1%}")
+                    else:
+                        rejection_reasons['no_profit_potential'] += 1
                 else:
-                    self.logger.info(f"❌ MARKET MAKING FILTERED: {market.market_id} - Insufficient edge on both sides")
+                    rejection_reasons['insufficient_edge'] += 1
+                    self.logger.debug(f"❌ MARKET MAKING FILTERED: {market.market_id} - Insufficient edge on both sides")
                     
             except Exception as e:
                 self.logger.error(f"Error analyzing market {market.market_id}: {e}")
+                rejection_reasons['errors'] += 1
                 continue
+        
+        # Log rejection summary
+        if any(v > 0 for v in rejection_reasons.values()):
+            self.logger.info(f"📊 Market making rejection summary: {rejection_reasons}")
         
         # Sort by expected profitability
         opportunities.sort(key=lambda x: x.total_expected_profit, reverse=True)

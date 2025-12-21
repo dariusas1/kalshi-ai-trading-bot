@@ -88,24 +88,31 @@ class KalshiClient(TradingLoggerMixin):
                     self.logger.info("Converting escaped newlines (\\n) to actual newlines")
                     private_key_env = private_key_env.replace('\\n', '\n')
                 
-                # Also handle case where newlines are completely missing
-                # PEM format: -----BEGIN PRIVATE KEY-----<base64>-----END PRIVATE KEY-----
-                if '-----BEGIN PRIVATE KEY-----' in private_key_env and '\n' not in private_key_env:
+                # Detect PEM key type (supports both RSA PRIVATE KEY and PRIVATE KEY)
+                is_rsa_key = '-----BEGIN RSA PRIVATE KEY-----' in private_key_env
+                is_pkcs8_key = '-----BEGIN PRIVATE KEY-----' in private_key_env
+                
+                if not is_rsa_key and not is_pkcs8_key:
+                    self.logger.error("KALSHI_PRIVATE_KEY does not appear to be in PEM format")
+                    self.logger.error(f"Key starts with: {private_key_env[:50]}...")
+                    raise KalshiAPIError("KALSHI_PRIVATE_KEY is not in valid PEM format (expected RSA PRIVATE KEY or PRIVATE KEY)")
+                
+                # Handle case where newlines are completely missing
+                begin_marker = '-----BEGIN RSA PRIVATE KEY-----' if is_rsa_key else '-----BEGIN PRIVATE KEY-----'
+                end_marker = '-----END RSA PRIVATE KEY-----' if is_rsa_key else '-----END PRIVATE KEY-----'
+                
+                if '\n' not in private_key_env:
                     self.logger.info("Reconstructing PEM format with proper newlines")
-                    # Extract the base64 content between headers
                     import re
-                    match = re.match(r'-----BEGIN PRIVATE KEY-----(.*?)-----END PRIVATE KEY-----', private_key_env, re.DOTALL)
+                    pattern = f'{re.escape(begin_marker)}(.*?){re.escape(end_marker)}'
+                    match = re.match(pattern, private_key_env, re.DOTALL)
                     if match:
                         base64_content = match.group(1).strip()
                         # Split into 64-character lines (PEM standard)
                         lines = [base64_content[i:i+64] for i in range(0, len(base64_content), 64)]
-                        private_key_env = '-----BEGIN PRIVATE KEY-----\n' + '\n'.join(lines) + '\n-----END PRIVATE KEY-----'
-
-                # Check if it looks like a PEM key
-                if not private_key_env.startswith('-----BEGIN PRIVATE KEY-----'):
-                    self.logger.error("KALSHI_PRIVATE_KEY does not appear to be in PEM format")
-                    self.logger.error(f"Key starts with: {private_key_env[:50]}...")
-                    raise KalshiAPIError("KALSHI_PRIVATE_KEY is not in valid PEM format")
+                        private_key_env = begin_marker + '\n' + '\n'.join(lines) + '\n' + end_marker
+                
+                self.logger.info(f"PEM key type: {'RSA' if is_rsa_key else 'PKCS8'}")
 
                 # Convert to bytes
                 private_key_bytes = private_key_env.encode('utf-8')
