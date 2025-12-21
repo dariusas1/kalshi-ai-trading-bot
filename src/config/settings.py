@@ -42,7 +42,7 @@ class TradingConfig:
     max_time_to_expiry_days: int = 14    # INCREASED: Allow longer timeframes (was 14, now 30)
     
     # AI decision making - MORE AGGRESSIVE THRESHOLDS
-    min_confidence_to_trade: float = 0.65   # 65% minimum AI confidence to trade
+    min_confidence_to_trade: float = 0.55   # REDUCED: 55% minimum AI confidence to trade (was 65%)
     scan_interval_seconds: int = 90      # Scan markets every 90 seconds
     
     # AI model configuration
@@ -157,7 +157,7 @@ class TradingConfig:
     # === MARKET SELECTION (ADVANCED) ===
     min_volume_for_analysis: float = 200.0
     min_volume_for_market_making: float = 500.0
-    min_price_movement: float = 0.02
+    min_price_movement: float = 0.0     # DISABLED: Allow 50/50 markets (was 0.02)
     min_confidence_long_term: float = 0.45
 
     # === PORTFOLIO OPTIMIZATION SETTINGS ===
@@ -171,7 +171,7 @@ class TradingConfig:
     max_correlation: float = 0.95
     max_drawdown: float = 0.50
     max_sector_exposure: float = 0.90
-    min_trade_edge: float = 0.08
+    min_trade_edge: float = 0.05
     min_confidence_for_large_size: float = 0.65
     max_reduction_per_cycle: float = 0.30
     min_position_value: float = 5.0
@@ -299,7 +299,7 @@ max_sector_exposure: float = 0.90       # Very high sector concentration (90%)
 # System performance objectives - MORE AGGRESSIVE FOR MORE TRADES
 target_sharpe: float = 0.3              # DECREASED: Lower Sharpe requirement (was 0.5, now 0.3)
 target_return: float = 0.15             # INCREASED: Higher return target (was 0.10, now 0.15)
-min_trade_edge: float = 0.08           # DECREASED: Lower edge requirement (was 0.15, now 8%)
+min_trade_edge: float = 0.05           # DECREASED: Lower edge requirement (was 0.15, now 5%)
 min_confidence_for_large_size: float = 0.65  # DECREASED: Lower confidence requirement (was 0.65, now 50%)
 
 # === DYNAMIC EXIT STRATEGIES ===
@@ -324,7 +324,7 @@ max_orders_per_market: int = 4          # Maximum orders per market (2 each side
 # max_time_to_expiry_days: REMOVED      # No longer used - trade any timeline!
 min_volume_for_analysis: float = 200.0  # DECREASED: Much lower minimum volume (was 1000, now 200)
 min_volume_for_market_making: float = 500.0  # DECREASED: Lower volume for market making (was 2000, now 500)
-min_price_movement: float = 0.02        # DECREASED: Lower minimum range (was 0.05, now 2¢)
+min_price_movement: float = 0.0        # DISABLED: Allow 50/50 markets (was 2%)
 max_bid_ask_spread: float = 0.15        # INCREASED: Allow wider spreads (was 0.10, now 15¢)
 min_confidence_long_term: float = 0.45  # DECREASED: Lower confidence for distant expiries (was 0.65, now 45%)
 

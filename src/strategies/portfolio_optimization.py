@@ -1051,6 +1051,7 @@ async def create_market_opportunities_from_markets(
             # Get current market data
             market_data = await kalshi_client.get_market(market.market_id)
             if not market_data:
+                logger.info(f"⏭️ Skipping {market.market_id} - No market data returned from API")
                 continue
             
             # FIXED: Extract from nested 'market' object (same fix as immediate trading)
@@ -1065,11 +1066,15 @@ async def create_market_opportunities_from_markets(
                 continue
             
             # Skip markets with extreme prices (too risky for portfolio)
-            if market_prob < 0.05 or market_prob > 0.95:
+            # RELAXED: 3%-97% range instead of 5%-95% to allow more opportunities
+            if market_prob < 0.03 or market_prob > 0.97:
+                logger.info(f"⏭️ Skipping {market.market_id} - Extreme price: {market_prob:.1%} (outside 3%-97% range)")
                 continue
 
             # Skip markets with insufficient price movement from 50/50
-            if abs(market_prob - 0.5) < settings.trading.min_price_movement:
+            price_movement = abs(market_prob - 0.5)
+            if price_movement < settings.trading.min_price_movement:
+                logger.info(f"⏭️ Skipping {market.market_id} - Insufficient movement: {price_movement:.1%} < {settings.trading.min_price_movement:.1%}")
                 continue
             
             # Get technical analysis if enabled
@@ -1090,12 +1095,16 @@ async def create_market_opportunities_from_markets(
             
             # If AI analysis failed, skip this market
             if predicted_prob is None or confidence is None:
-                logger.warning(f"AI analysis failed for {market.market_id}, skipping")
+                logger.warning(f"⏭️ AI analysis failed for {market.market_id} - predicted_prob={predicted_prob}, confidence={confidence}")
                 continue
+
+            # Log the AI prediction for debugging
+            ai_edge = predicted_prob - market_prob
+            logger.info(f"🤖 AI Prediction for {market.market_id}: AI={predicted_prob:.1%}, Market={market_prob:.1%}, Edge={ai_edge:.1%}, Confidence={confidence:.1%}")
 
             if confidence < settings.trading.min_confidence_to_trade:
                 logger.info(
-                    f"Skipping {market.market_id} due to low confidence "
+                    f"⏭️ Skipping {market.market_id} due to low confidence "
                     f"({confidence:.1%} < {settings.trading.min_confidence_to_trade:.1%})"
                 )
                 continue

@@ -242,9 +242,9 @@ class AutomatedPerformanceAnalyzer:
             # Get portfolio data for calculations
             portfolio_data = await self._gather_portfolio_data()
             
-            total_trades = trade_stats[0] if trade_stats else 0
-            manual_trades = manual_stats[0] if manual_stats else 0
-            auto_trades = auto_stats[0] if auto_stats else 0
+            total_trades = trade_stats[0] if trade_stats and trade_stats[0] else 0
+            manual_trades = manual_stats[0] if manual_stats and manual_stats[0] else 0
+            auto_trades = auto_stats[0] if auto_stats and auto_stats[0] else 0
             
             # Store trade date range for context
             self.trade_date_range = {
@@ -252,22 +252,29 @@ class AutomatedPerformanceAnalyzer:
                 'latest': trade_stats[7] if trade_stats and trade_stats[7] else 'Unknown'
             }
             
+            # Ensure all numeric values are floats (not None) to prevent format string errors
+            available_cash = float(portfolio_data.get('available_cash') or 0)
+            total_portfolio_value = float(portfolio_data.get('total_portfolio_value') or 0)
+            active_positions = int(portfolio_data.get('active_positions') or 0)
+            avg_pos_size = float(position_stats[1]) if position_stats and position_stats[1] else 0.0
+            largest_pos = float(position_stats[2]) if position_stats and position_stats[2] else 0.0
+            
             return PerformanceMetrics(
                 total_trades=total_trades,
                 manual_trades=manual_trades,
                 automated_trades=auto_trades,
-                manual_win_rate=(manual_stats[1] / manual_trades) if manual_trades > 0 else 0,
-                automated_win_rate=(auto_stats[1] / auto_trades) if auto_trades > 0 else 0,
-                overall_win_rate=(trade_stats[1] / total_trades) if total_trades > 0 else 0,
-                total_pnl=trade_stats[3] if trade_stats else 0,
-                manual_pnl=manual_stats[2] if manual_stats else 0,
-                automated_pnl=auto_stats[2] if auto_stats else 0,
-                unrealized_pnl=0,  # Will be calculated from current positions
-                capital_utilization=((portfolio_data['total_portfolio_value'] - portfolio_data['available_cash']) / portfolio_data['total_portfolio_value']) * 100 if portfolio_data['total_portfolio_value'] > 0 else 0,
-                available_cash=portfolio_data['available_cash'],
-                active_positions=portfolio_data['active_positions'],
-                avg_position_size=position_stats[1] if position_stats else 0,
-                largest_position_pct=(position_stats[2] / portfolio_data['total_portfolio_value']) * 100 if portfolio_data['total_portfolio_value'] > 0 and position_stats[2] else 0
+                manual_win_rate=float((manual_stats[1] or 0) / manual_trades) if manual_trades > 0 else 0.0,
+                automated_win_rate=float((auto_stats[1] or 0) / auto_trades) if auto_trades > 0 else 0.0,
+                overall_win_rate=float((trade_stats[1] or 0) / total_trades) if total_trades > 0 else 0.0,
+                total_pnl=float(trade_stats[3]) if trade_stats and trade_stats[3] else 0.0,
+                manual_pnl=float(manual_stats[2]) if manual_stats and manual_stats[2] else 0.0,
+                automated_pnl=float(auto_stats[2]) if auto_stats and auto_stats[2] else 0.0,
+                unrealized_pnl=0.0,  # Will be calculated from current positions
+                capital_utilization=((total_portfolio_value - available_cash) / total_portfolio_value) * 100 if total_portfolio_value > 0 else 0.0,
+                available_cash=available_cash,
+                active_positions=active_positions,
+                avg_position_size=avg_pos_size,
+                largest_position_pct=(largest_pos / total_portfolio_value) * 100 if total_portfolio_value > 0 else 0.0
             )
     
     async def _run_risk_checks(self, portfolio_data: Dict[str, Any], metrics: PerformanceMetrics) -> List[RiskCheck]:
