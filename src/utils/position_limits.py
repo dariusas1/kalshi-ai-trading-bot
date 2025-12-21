@@ -255,15 +255,24 @@ class PositionLimitsManager:
             balance_response = await self.kalshi_client.get_balance()
             available_cash = balance_response.get('balance', 0) / 100
             
-            # Get current positions value
+            # Get current positions value - properly extract from Kalshi API
             positions_response = await self.kalshi_client.get_positions()
-            positions = positions_response.get('positions', []) if isinstance(positions_response, dict) else []
+            # Kalshi API returns 'market_positions' not 'positions'
+            positions = (
+                positions_response.get('market_positions')
+                or positions_response.get('positions')
+                or []
+            ) if isinstance(positions_response, dict) else []
+            
             total_position_value = 0
             
             for position in positions:
                 if not isinstance(position, dict):
                     continue
-                quantity = position.get('quantity', 0)
+                # Kalshi uses 'position' key for quantity, not 'quantity'
+                quantity = position.get('position', 0)
+                if quantity == 0:
+                    quantity = position.get('quantity', 0)
                 if quantity != 0:
                     # Estimate position value (could be improved with real-time pricing)
                     position_value = abs(quantity) * 0.50  # Conservative estimate

@@ -236,7 +236,8 @@ def load_system_health():
             market_positions = _extract_positions(positions_response)
             
             total_position_value = 0
-            positions_count = len(market_positions)
+            # Only count positions with non-zero quantity (active positions)
+            positions_count = len([p for p in market_positions if p.get('position', 0) != 0])
             
             # Calculate current value of all positions
             for position in market_positions:
