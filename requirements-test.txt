@@ -1,0 +1,14 @@
+# Testing requirements for the AI trading bot
+
+# Core testing framework
+pytest>=8.0.0
+pytest-asyncio>=0.24.0
+pytest-mock>=3.14.0
+
+# Testing utilities
+pytest-cov>=5.0.0
+pytest-xdist>=3.6.0
+pytest-benchmark>=4.0.0
+
+# Async testing support
+anyio>=4.4.0

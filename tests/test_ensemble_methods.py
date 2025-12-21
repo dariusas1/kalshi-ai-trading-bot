@@ -7,6 +7,7 @@ confidence-based selection, cascading ensemble, disagreement detection, and unce
 
 import asyncio
 import pytest
+import pytest_asyncio
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 from typing import Dict, Any, List, Optional

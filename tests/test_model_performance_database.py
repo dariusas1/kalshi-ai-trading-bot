@@ -3,6 +3,7 @@ Tests for model performance tracking database functionality.
 """
 
 import pytest
+import pytest_asyncio
 import asyncio
 from datetime import datetime, timedelta
 from src.utils.database import DatabaseManager

@@ -9,11 +9,10 @@ import asyncio
 import hashlib
 import json
 import statistics
-from typing import Dict, Any, List, Optional, Tuple, Set
+from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from collections import defaultdict, OrderedDict
-import logging
 
 from src.utils.performance_tracker import (
     PerformanceTracker,

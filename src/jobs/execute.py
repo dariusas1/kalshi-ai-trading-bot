@@ -13,6 +13,7 @@ from src.utils.database import DatabaseManager, Position
 from src.config.settings import settings
 from src.utils.logging_setup import get_trading_logger
 from src.clients.kalshi_client import KalshiClient, KalshiAPIError
+from src.utils.pricing_utils import PriceSelector, PriceConverter, create_order_price
 
 async def execute_position(
     position: Position, 
@@ -99,17 +100,18 @@ async def execute_position(
                 "type_": order_type
             }
             
-            # 🚨 FIX: Kalshi API requires exactly ONE price field, even for market orders
-            # Use current ask + buffer as price cap when available.
+            # 🔧 FIX: Use proper bid/ask pricing logic for order execution
             buffer_cents = getattr(settings.trading, "market_order_price_buffer_cents", 2)
             market_data = await kalshi_client.get_market(position.market_id)
             market_info = market_data.get("market", {}) if market_data else {}
+
+            # Create order price with proper bid/ask logic and safety buffer
+            order_price = create_order_price(market_info, position, buffer_cents, max_price=99)
+
             if position.side.lower() == "yes":
-                ask = market_info.get("yes_ask", 0) or market_info.get("yes_price", 99)
-                order_args["yes_price"] = min(99, int(ask + buffer_cents))
+                order_args["yes_price"] = order_price
             else:
-                ask = market_info.get("no_ask", 0) or market_info.get("no_price", 99)
-                order_args["no_price"] = min(99, int(ask + buffer_cents))
+                order_args["no_price"] = order_price
             
             if time_in_force:
                 order_args["time_in_force"] = time_in_force
@@ -129,10 +131,16 @@ async def execute_position(
             
             logger.info(f"Order placed for {position.market_id}. Order ID: {order_id}, Status: {order_status}")
             
-            # 🚨 FIX: Verify order actually filled before marking live
+            # 🔧 FIX: Verify order actually filled before marking live
             if order_status in ['filled', 'executed']:  # Kalshi API may return 'executed' for immediate fills
                 # Order filled immediately (market order behavior)
-                fill_price = order_info.get('yes_price', order_info.get('no_price', position.entry_price * 100)) / 100
+                # Use actual fill price from order, convert from cents to dollars
+                fill_price_cents = order_info.get('yes_price', order_info.get('no_price', 0))
+                if fill_price_cents > 0:
+                    fill_price = PriceConverter.cents_to_dollars(fill_price_cents)
+                else:
+                    # Fallback to position entry price (stored in database as dollars)
+                    fill_price = float(position.entry_price)
                 await db_manager.update_position_to_live(position.id, fill_price)
                 logger.info(f"✅ Order FILLED for {position.market_id} at ${fill_price:.2f}")
                 return True

@@ -18,6 +18,7 @@ from src.intelligence.ensemble_engine import EnsembleEngine, EnsembleConfig, Ens
 from src.intelligence.model_selector import ModelSelector
 from src.intelligence.cost_optimizer import CostOptimizer
 from src.intelligence.fallback_manager import FallbackManager
+from src.jobs.decide import make_decision_for_market
 from src.config.settings import settings
 
 
@@ -324,7 +325,6 @@ class TestDecisionLogicIntegration:
             mock_xai_client.get_ensemble_decision = AsyncMock(return_value=mock_ensemble_decision)
 
             # Test the decision logic
-            from src.jobs.decide import make_decision_for_market
 
             result = await make_decision_for_market(
                 mock_market, mock_db_manager, mock_xai_client, mock_kalshi_client
@@ -366,7 +366,6 @@ class TestDecisionLogicIntegration:
             mock_xai_client.get_trading_decision = AsyncMock(return_value=mock_single_decision)
 
             # Test the decision logic
-            from src.jobs.decide import make_decision_for_market
 
             result = await make_decision_for_market(
                 mock_market, mock_db_manager, mock_xai_client, mock_kalshi_client
@@ -410,8 +409,6 @@ class TestEnsembleComponentCoordination:
     async def test_ensemble_components_initialization(self, mock_db_manager):
         """Test that ensemble components initialize and coordinate correctly."""
         from src.intelligence.ensemble_engine import EnsembleEngine, EnsembleConfig
-        from src.intelligence.model_selector import ModelSelector
-        from src.intelligence.cost_optimizer import CostOptimizer
         from src.utils.performance_tracker import PerformanceTracker
 
         # Create components
@@ -441,8 +438,7 @@ class TestEnsembleComponentCoordination:
     @pytest.mark.asyncio
     async def test_component_data_flow(self, mock_db_manager):
         """Test data flow between ensemble components."""
-        from src.intelligence.model_selector import ModelSelector
-        from src.intelligence.cost_optimizer import CostOptimizer
+        # ModelSelector and CostOptimizer already imported at top
         from src.utils.performance_tracker import PerformanceTracker
 
         # Create components
@@ -471,7 +467,6 @@ class TestEnsembleComponentCoordination:
     async def test_ensemble_state_management(self, mock_db_manager):
         """Test that ensemble state is managed correctly."""
         from src.intelligence.ensemble_engine import EnsembleEngine, EnsembleConfig
-        from src.intelligence.model_selector import ModelSelector
         from src.utils.performance_tracker import PerformanceTracker
 
         # Create ensemble engine
@@ -500,7 +495,7 @@ class TestEnsembleComponentCoordination:
     @pytest.mark.asyncio
     async def test_component_error_handling(self, mock_db_manager):
         """Test that ensemble components handle errors gracefully."""
-        from src.intelligence.fallback_manager import FallbackManager
+        # FallbackManager already imported at top
         from src.intelligence.provider_manager import ProviderManager
 
         # Create components

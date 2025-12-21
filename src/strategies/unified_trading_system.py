@@ -22,12 +22,10 @@ Key innovations:
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Union
-from dataclasses import dataclass, asdict
-import numpy as np
+from datetime import datetime
+from typing import Dict, List, Optional
+from dataclasses import dataclass
 
-from src.clients.kalshi_client import KalshiClient
 from src.clients.kalshi_client import KalshiClient
 from src.clients.xai_client import XAIClient
 from src.intelligence.enhanced_client import EnhancedAIClient

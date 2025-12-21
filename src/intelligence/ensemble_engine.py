@@ -7,11 +7,9 @@ confidence-based selection, cascading ensemble, disagreement detection, and unce
 
 import asyncio
 import statistics
-from typing import Dict, Any, List, Optional, Tuple, Set
+from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-import json
-import logging
 from enum import Enum
 
 from src.clients.xai_client import TradingDecision

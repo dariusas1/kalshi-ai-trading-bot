@@ -8,6 +8,7 @@ Total: 7 additional strategic tests (within the 9 test maximum limit)
 """
 
 import pytest
+import pytest_asyncio
 import asyncio
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch

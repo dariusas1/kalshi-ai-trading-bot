@@ -6,7 +6,7 @@ import aiosqlite
 from dataclasses import dataclass, asdict
 import logging
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any
 
 from src.utils.logging_setup import TradingLoggerMixin
@@ -595,8 +595,8 @@ class DatabaseManager(TradingLoggerMixin):
         Returns:
             Number of markets removed.
         """
-        now_ts = int(datetime.now().timestamp())
-        cutoff_time = (datetime.now() - timedelta(hours=max_age_hours)).isoformat()
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        cutoff_time = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
         
         async with aiosqlite.connect(self.db_path) as db:
             # Get count before deletion for logging
@@ -633,7 +633,7 @@ class DatabaseManager(TradingLoggerMixin):
         Returns:
             A list of eligible markets.
         """
-        now_ts = int(datetime.now().timestamp())
+        now_ts = int(datetime.now(timezone.utc).timestamp())
         max_expiry_ts = now_ts + (max_days_to_expiry * 24 * 60 * 60)
 
         async with aiosqlite.connect(self.db_path) as db:
@@ -985,7 +985,7 @@ class DatabaseManager(TradingLoggerMixin):
     ) -> List[LLMQuery]:
         """Get recent LLM queries, optionally filtered by strategy."""
         try:
-            cutoff_time = datetime.now() - timedelta(hours=hours_back)
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours_back)
             
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
@@ -1088,8 +1088,8 @@ class DatabaseManager(TradingLoggerMixin):
         analysis_type: str = 'standard'
     ) -> None:
         """Record that a market was analyzed to prevent duplicate analysis."""
-        now = datetime.now().isoformat()
-        today = datetime.now().strftime('%Y-%m-%d')
+        now = datetime.now(timezone.utc).isoformat()
+        today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
         
         async with aiosqlite.connect(self.db_path) as db:
             # Record the analysis
@@ -1112,7 +1112,7 @@ class DatabaseManager(TradingLoggerMixin):
 
     async def was_recently_analyzed(self, market_id: str, hours: int = 6) -> bool:
         """Check if market was analyzed within the specified hours."""
-        cutoff_time = datetime.now() - timedelta(hours=hours)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
         cutoff_str = cutoff_time.isoformat()
         
         async with aiosqlite.connect(self.db_path) as db:
@@ -1126,7 +1126,7 @@ class DatabaseManager(TradingLoggerMixin):
     async def get_daily_ai_cost(self, date: str = None) -> float:
         """Get total AI cost for a specific date (defaults to today)."""
         if date is None:
-            date = datetime.now().strftime('%Y-%m-%d')
+            date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
         
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute("""
@@ -1138,7 +1138,7 @@ class DatabaseManager(TradingLoggerMixin):
     async def get_daily_ai_cost_breakdown(self, date: str = None) -> Dict[str, Any]:
         """Get detailed AI cost breakdown for a specific date."""
         if date is None:
-            date = datetime.now().strftime('%Y-%m-%d')
+            date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
         
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
@@ -1165,7 +1165,7 @@ class DatabaseManager(TradingLoggerMixin):
 
     async def get_market_analysis_count_today(self, market_id: str) -> int:
         """Get number of times market was analyzed today."""
-        today = datetime.now().strftime('%Y-%m-%d')
+        today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
         
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute("""
@@ -1430,18 +1430,23 @@ class DatabaseManager(TradingLoggerMixin):
                     self.logger.info("📊 No kalshi_fills to process")
                     return {'trades_created': 0, 'fills_processed': 0}
                 
-                # Group fills by ticker
+                # Group fills by ticker and side for proper matching
                 fills_by_ticker = {}
                 for fill in all_fills:
                     ticker = fill['ticker']
                     if ticker not in fills_by_ticker:
-                        fills_by_ticker[ticker] = {'buys': [], 'sells': []}
-                    
+                        fills_by_ticker[ticker] = {
+                            'yes': {'buys': [], 'sells': []},
+                            'no': {'buys': [], 'sells': []}
+                        }
+
                     fill_dict = dict(fill)
+                    side = fill.get('side', 'yes').lower()  # Default to 'yes' for safety
+
                     if fill['action'] == 'buy':
-                        fills_by_ticker[ticker]['buys'].append(fill_dict)
+                        fills_by_ticker[ticker][side]['buys'].append(fill_dict)
                     elif fill['action'] == 'sell':
-                        fills_by_ticker[ticker]['sells'].append(fill_dict)
+                        fills_by_ticker[ticker][side]['sells'].append(fill_dict)
                 
                 # Check which fill_ids are already processed
                 cursor = await db.execute("""
@@ -1451,94 +1456,99 @@ class DatabaseManager(TradingLoggerMixin):
                 for row in await cursor.fetchall():
                     existing_trades.add((row['market_id'], row['side'], row['entry_timestamp']))
                 
-                # Process each ticker
-                for ticker, fill_groups in fills_by_ticker.items():
-                    buys = fill_groups['buys']
-                    sells = fill_groups['sells']
-                    
-                    # Match buys with sells (FIFO)
-                    buy_idx = 0
-                    sell_idx = 0
-                    
-                    while buy_idx < len(buys) and sell_idx < len(sells):
-                        buy = buys[buy_idx]
-                        sell = sells[sell_idx]
-                        
-                        # Ensure buy happened before sell for valid P&L
-                        buy_time = buy.get('created_time', '')
-                        sell_time = sell.get('created_time', '')
-                        
-                        if buy_time > sell_time:
-                            # This sell was before this buy - skip this sell
-                            sell_idx += 1
+                # Process each ticker and side separately
+                for ticker, side_groups in fills_by_ticker.items():
+                    for side, fill_groups in side_groups.items():
+                        buys = fill_groups['buys']
+                        sells = fill_groups['sells']
+
+                        # Only process if we have both buys and sells for this side
+                        if not buys or not sells:
                             continue
+
+                        # Match buys with sells (FIFO) for this specific side
+                        buy_idx = 0
+                        sell_idx = 0
+
+                        while buy_idx < len(buys) and sell_idx < len(sells):
+                            buy = buys[buy_idx]
+                            sell = sells[sell_idx]
+
+                            # Ensure buy happened before sell for valid P&L
+                            buy_time = buy.get('created_time', '')
+                            sell_time = sell.get('created_time', '')
+
+                            if buy_time > sell_time:
+                                # This sell was before this buy - skip this sell
+                                sell_idx += 1
+                                continue
+
+                            # Match quantity
+                            buy_remaining = buy.get('count', 0)
+                            sell_remaining = sell.get('count', 0)
+                            matched_qty = min(buy_remaining, sell_remaining)
+
+                            if matched_qty <= 0:
+                                buy_idx += 1
+                                continue
+
+                            # Get prices (in cents, convert to dollars)
+                            # Since we're processing by side, we know the side already
+                            if side == 'yes':
+                                entry_price = buy.get('yes_price', 0) / 100
+                                exit_price = sell.get('yes_price', 0) / 100
+                            else:  # side == 'no'
+                                entry_price = buy.get('no_price', 0) / 100
+                                exit_price = sell.get('no_price', 0) / 100
                         
-                        # Match quantity
-                        buy_remaining = buy.get('count', 0)
-                        sell_remaining = sell.get('count', 0)
-                        matched_qty = min(buy_remaining, sell_remaining)
-                        
-                        if matched_qty <= 0:
-                            buy_idx += 1
-                            continue
-                        
-                        # Get prices (in cents, convert to dollars)
-                        side = buy.get('side', 'yes').lower()
-                        if side == 'yes':
-                            entry_price = buy.get('yes_price', 0) / 100
-                            exit_price = sell.get('yes_price', 0) / 100
-                        else:
-                            entry_price = buy.get('no_price', 0) / 100
-                            exit_price = sell.get('no_price', 0) / 100
-                        
-                        # Calculate P&L
-                        pnl = (exit_price - entry_price) * matched_qty
-                        
-                        # Check for duplicate
-                        trade_key = (ticker, side.upper(), buy_time)
-                        if trade_key in existing_trades:
-                            # Already processed, move on
+                            # Calculate P&L
+                            pnl = (exit_price - entry_price) * matched_qty
+
+                            # Check for duplicate
+                            trade_key = (ticker, side.upper(), buy_time)
+                            if trade_key in existing_trades:
+                                # Already processed, move on
+                                buys[buy_idx]['count'] = buy_remaining - matched_qty
+                                sells[sell_idx]['count'] = sell_remaining - matched_qty
+                                if buys[buy_idx]['count'] <= 0:
+                                    buy_idx += 1
+                                if sells[sell_idx]['count'] <= 0:
+                                    sell_idx += 1
+                                continue
+
+                            # Insert into trade_logs
+                            try:
+                                await db.execute("""
+                                    INSERT INTO trade_logs
+                                    (market_id, side, entry_price, exit_price, quantity, pnl,
+                                     entry_timestamp, exit_timestamp, rationale, strategy)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """, (
+                                    ticker,
+                                    side.upper(),
+                                    entry_price,
+                                    exit_price,
+                                    matched_qty,
+                                    pnl,
+                                    buy_time,
+                                    sell_time,
+                                    f"Auto-matched from fills (buy_id={buy.get('fill_id')}, sell_id={sell.get('fill_id')})",
+                                    'kalshi_sync'
+                                ))
+                                trades_created += 1
+                                fills_processed += 2
+                                existing_trades.add(trade_key)
+                            except Exception as e:
+                                self.logger.debug(f"Could not insert trade for {ticker}: {e}")
+
+                            # Decrement remaining quantities
                             buys[buy_idx]['count'] = buy_remaining - matched_qty
                             sells[sell_idx]['count'] = sell_remaining - matched_qty
+
                             if buys[buy_idx]['count'] <= 0:
                                 buy_idx += 1
                             if sells[sell_idx]['count'] <= 0:
                                 sell_idx += 1
-                            continue
-                        
-                        # Insert into trade_logs
-                        try:
-                            await db.execute("""
-                                INSERT INTO trade_logs 
-                                (market_id, side, entry_price, exit_price, quantity, pnl, 
-                                 entry_timestamp, exit_timestamp, rationale, strategy)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """, (
-                                ticker,
-                                side.upper(),
-                                entry_price,
-                                exit_price,
-                                matched_qty,
-                                pnl,
-                                buy_time,
-                                sell_time,
-                                f"Auto-matched from fills (buy_id={buy.get('fill_id')}, sell_id={sell.get('fill_id')})",
-                                'kalshi_sync'
-                            ))
-                            trades_created += 1
-                            fills_processed += 2
-                            existing_trades.add(trade_key)
-                        except Exception as e:
-                            self.logger.debug(f"Could not insert trade for {ticker}: {e}")
-                        
-                        # Decrement remaining quantities
-                        buys[buy_idx]['count'] = buy_remaining - matched_qty
-                        sells[sell_idx]['count'] = sell_remaining - matched_qty
-                        
-                        if buys[buy_idx]['count'] <= 0:
-                            buy_idx += 1
-                        if sells[sell_idx]['count'] <= 0:
-                            sell_idx += 1
                 
                 await db.commit()
                 
@@ -1637,7 +1647,7 @@ class DatabaseManager(TradingLoggerMixin):
                 INSERT INTO trading_settings (key, value, updated_at)
                 VALUES (?, ?, ?)
                 ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = ?
-            """, (key, value, datetime.now().isoformat(), value, datetime.now().isoformat()))
+            """, (key, value, datetime.now(timezone.utc).isoformat(), value, datetime.now(timezone.utc).isoformat()))
             await db.commit()
 
     async def get_category_performance(self) -> Dict[str, Dict]:
@@ -1897,7 +1907,7 @@ class DatabaseManager(TradingLoggerMixin):
             if row:
                 # Check expiry (optional, processor runs every 5 mins)
                 computed_at = datetime.fromisoformat(row['computed_at'])
-                if (datetime.now() - computed_at).total_seconds() < 900:  # 15 mins
+                if (datetime.now(timezone.utc) - computed_at).total_seconds() < 900:  # 15 mins
                     return json.loads(row['value'])
             return None
 
@@ -1908,7 +1918,7 @@ class DatabaseManager(TradingLoggerMixin):
             async with aiosqlite.connect(self.db_path) as db:
                 await db.execute(
                     "INSERT OR REPLACE INTO analytics_cache (key, value, computed_at) VALUES (?, ?, ?)",
-                    (key, payload, datetime.now().isoformat())
+                    (key, payload, datetime.now(timezone.utc).isoformat())
                 )
                 await db.commit()
         except Exception as e:
@@ -2012,7 +2022,7 @@ class DatabaseManager(TradingLoggerMixin):
     async def get_model_performance_aggregation(self, model_name: str, window_hours: int = 24) -> Optional[Dict]:
         """Get aggregated performance metrics for a model over a time window."""
         try:
-            cutoff_time = datetime.now() - timedelta(hours=window_hours)
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=window_hours)
 
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
@@ -2051,7 +2061,7 @@ class DatabaseManager(TradingLoggerMixin):
     async def get_model_cost_today(self, model_name: str) -> float:
         """Get total cost for a model today."""
         try:
-            today = datetime.now().strftime('%Y-%m-%d')
+            today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
             async with aiosqlite.connect(self.db_path) as db:
                 cursor = await db.execute("""
@@ -2069,7 +2079,7 @@ class DatabaseManager(TradingLoggerMixin):
     async def get_all_model_costs_today(self) -> Dict[str, float]:
         """Get total costs for all models today."""
         try:
-            today = datetime.now().strftime('%Y-%m-%d')
+            today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
@@ -2174,7 +2184,7 @@ class DatabaseManager(TradingLoggerMixin):
         """Save an ensemble decision record."""
         try:
             if decision.timestamp is None:
-                decision.timestamp = datetime.now()
+                decision.timestamp = datetime.now(timezone.utc)
 
             async with aiosqlite.connect(self.db_path) as db:
                 cursor = await db.execute("""
@@ -2263,7 +2273,7 @@ class DatabaseManager(TradingLoggerMixin):
     async def get_ensemble_analysis(self, hours_back: int = 24) -> Optional[Dict]:
         """Get analysis of ensemble decisions over a time period."""
         try:
-            cutoff_time = datetime.now() - timedelta(hours=hours_back)
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours_back)
 
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
@@ -2300,7 +2310,7 @@ class DatabaseManager(TradingLoggerMixin):
     async def get_model_usage_stats(self, hours_back: int = 24) -> Dict[str, Dict]:
         """Get usage statistics for models in ensemble decisions."""
         try:
-            cutoff_time = datetime.now() - timedelta(hours=hours_back)
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours_back)
 
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
@@ -2352,7 +2362,7 @@ class DatabaseManager(TradingLoggerMixin):
     async def get_disagreement_analysis(self, hours_back: int = 24) -> Optional[Dict]:
         """Get analysis of disagreement levels in ensemble decisions."""
         try:
-            cutoff_time = datetime.now() - timedelta(hours=hours_back)
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours_back)
 
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
@@ -2389,7 +2399,7 @@ class DatabaseManager(TradingLoggerMixin):
     async def get_model_performance_by_category(self, market_category: str, hours_back: int = 24) -> List[ModelPerformance]:
         """Get model performance records for a specific market category."""
         try:
-            cutoff_time = datetime.now() - timedelta(hours=hours_back)
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours_back)
 
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
@@ -2474,7 +2484,7 @@ class DatabaseManager(TradingLoggerMixin):
     async def get_ensemble_decisions_with_market_data(self, hours_back: int = 24, limit: int = 100) -> List[Dict]:
         """Get ensemble decisions with associated market data."""
         try:
-            cutoff_time = datetime.now() - timedelta(hours=hours_back)
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours_back)
 
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
@@ -2680,7 +2690,7 @@ class DatabaseManager(TradingLoggerMixin):
                     decision.disagreement_level,
                     decision.selected_model,
                     decision.reasoning,
-                    decision.timestamp.isoformat() if decision.timestamp else datetime.now().isoformat()
+                    decision.timestamp.isoformat() if decision.timestamp else datetime.now(timezone.utc).isoformat()
                 ))
 
                 record_id = cursor.lastrowid
@@ -2850,7 +2860,7 @@ class DatabaseManager(TradingLoggerMixin):
                     INSERT INTO order_idempotency 
                     (idempotency_key, market_id, side, action, status, created_at)
                     VALUES (?, ?, ?, ?, ?, ?)
-                """, (idempotency_key, market_id, side, action, status, datetime.now().isoformat()))
+                """, (idempotency_key, market_id, side, action, status, datetime.now(timezone.utc).isoformat()))
                 await db.commit()
                 self.logger.info(f"Idempotency key stored: {idempotency_key[:8]}... for {market_id}")
                 return True
@@ -2911,7 +2921,7 @@ class DatabaseManager(TradingLoggerMixin):
         Returns count of deleted records.
         """
         try:
-            cutoff = (datetime.now() - timedelta(hours=hours)).isoformat()
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
             async with aiosqlite.connect(self.db_path) as db:
                 cursor = await db.execute(
                     "SELECT COUNT(*) FROM order_idempotency WHERE created_at < ?",
@@ -2953,7 +2963,7 @@ class DatabaseManager(TradingLoggerMixin):
                     "pause_reason": None,
                     "paused_at": None,
                     "hourly_loss": 0.0,
-                    "hourly_window_start": datetime.now().isoformat(),
+                    "hourly_window_start": datetime.now(timezone.utc).isoformat(),
                     "manual_override": False,
                     "total_account_balance": 0.0
                 }
@@ -2961,7 +2971,7 @@ class DatabaseManager(TradingLoggerMixin):
             self.logger.error(f"Error getting circuit breaker state: {e}")
             return {"is_paused": True, "pause_reason": f"Error reading state: {e}"}
 
-    async def set_circuit_breaker_paused(self, is_paused: bool, reason: str = None) -> bool:
+    async def set_circuit_breaker_paused(self, is_paused: bool, reason: Optional[str] = None) -> bool:
         """
         Set the circuit breaker pause state.
         """
@@ -2972,14 +2982,14 @@ class DatabaseManager(TradingLoggerMixin):
                         UPDATE circuit_breaker_state 
                         SET is_paused = 1, pause_reason = ?, paused_at = ?
                         WHERE id = 1
-                    """, (reason, datetime.now().isoformat()))
+                    """, (reason, datetime.now(timezone.utc).isoformat()))
                 else:
                     await db.execute("""
                         UPDATE circuit_breaker_state 
                         SET is_paused = 0, pause_reason = NULL, paused_at = NULL, 
                             hourly_loss = 0.0, hourly_window_start = ?
                         WHERE id = 1
-                    """, (datetime.now().isoformat(),))
+                    """, (datetime.now(timezone.utc).isoformat(),))
                 await db.commit()
                 
                 if is_paused:
@@ -2992,9 +3002,10 @@ class DatabaseManager(TradingLoggerMixin):
             return False
 
     async def update_circuit_breaker_hourly_loss(
-        self, 
-        pnl_delta: float, 
-        account_balance: float
+        self,
+        pnl_delta: float,
+        account_balance: float,
+        loss_threshold_pct: float = 0.05
     ) -> Dict[str, Any]:
         """
         Update hourly loss tracking. Resets window if hour has passed.
@@ -3011,13 +3022,13 @@ class DatabaseManager(TradingLoggerMixin):
                 window_start_str = state.get("hourly_window_start")
                 if window_start_str:
                     window_start = datetime.fromisoformat(window_start_str)
-                    if datetime.now() - window_start > timedelta(hours=1):
+                    if datetime.now(timezone.utc) - window_start > timedelta(hours=1):
                         # Reset hourly window
                         await db.execute("""
                             UPDATE circuit_breaker_state 
                             SET hourly_loss = ?, hourly_window_start = ?, total_account_balance = ?
                             WHERE id = 1
-                        """, (pnl_delta, datetime.now().isoformat(), account_balance))
+                        """, (pnl_delta, datetime.now(timezone.utc).isoformat(), account_balance))
                         await db.commit()
                         return {
                             "hourly_loss": pnl_delta,
@@ -3039,7 +3050,7 @@ class DatabaseManager(TradingLoggerMixin):
                 
                 return {
                     "hourly_loss": new_hourly_loss,
-                    "should_trip": loss_pct >= 0.05,  # 5% threshold
+                    "should_trip": loss_pct >= loss_threshold_pct,  # Use configurable threshold
                     "loss_pct": loss_pct
                 }
         except Exception as e:

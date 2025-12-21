@@ -25,7 +25,7 @@ from src.utils.logging_setup import TradingLoggerMixin
 from src.intelligence.ensemble_engine import EnsembleEngine, EnsembleConfig, EnsembleResult
 from src.intelligence.model_selector import ModelSelector
 from src.intelligence.cost_optimizer import CostOptimizer
-from src.intelligence.fallback_manager import FallbackManager
+from src.intelligence.fallback_manager import FallbackManager, ProviderConfig
 from src.intelligence.provider_manager import ProviderManager
 from src.utils.performance_tracker import PerformanceTracker
 from src.utils.database import DatabaseManager
@@ -313,13 +313,73 @@ class EnsembleCoordinator(TradingLoggerMixin):
         """Initialize management components."""
         self.logger.info("Initializing management components...")
 
-        # Fallback manager
-        self._fallback_manager = FallbackManager()
+        # Create provider configurations
+        providers = self._create_provider_configs()
 
         # Provider manager
-        self._provider_manager = ProviderManager()
+        self._provider_manager = ProviderManager(providers)
+
+        # Fallback manager
+        self._fallback_manager = FallbackManager(self.db_manager, providers)
 
         self.logger.info("Management components initialized")
+
+    def _create_provider_configs(self) -> Dict[str, ProviderConfig]:
+        """Create provider configurations from settings."""
+        providers = {}
+
+        # xAI provider
+        if settings.api.xai_api_key:
+            providers["xai"] = ProviderConfig(
+                name="xai",
+                endpoint="https://api.x.ai/v1",
+                api_key=settings.api.xai_api_key,
+                models=getattr(settings.trading, 'xai_models', ["grok-4", "grok-3"]),
+                priority=1,
+                timeout=getattr(settings.trading, 'ai_timeout', 120.0),
+                max_retries=getattr(settings.trading, 'ai_max_retries', 3),
+                cost_per_token=0.000015
+            )
+
+        # OpenAI provider
+        if settings.api.openai_api_key:
+            providers["openai"] = ProviderConfig(
+                name="openai",
+                endpoint=settings.api.openai_base_url or "https://api.openai.com/v1",
+                api_key=settings.api.openai_api_key,
+                models=getattr(settings.trading, 'openai_models', ["gpt-4", "gpt-3.5-turbo"]),
+                priority=2,
+                timeout=25.0,
+                max_retries=3,
+                cost_per_token=0.00001
+            )
+
+        # Anthropic provider
+        if hasattr(settings.api, 'anthropic_api_key') and settings.api.anthropic_api_key:
+            providers["anthropic"] = ProviderConfig(
+                name="anthropic",
+                endpoint="https://api.anthropic.com/v1",
+                api_key=settings.api.anthropic_api_key,
+                models=["claude-3-opus", "claude-3-sonnet"],
+                priority=3,
+                timeout=35.0,
+                max_retries=2,
+                cost_per_token=0.000025
+            )
+
+        # Local provider
+        providers["local"] = ProviderConfig(
+            name="local",
+            endpoint="http://localhost:11434/v1",  # Ollama default
+            api_key=os.getenv("OLLAMA_API_KEY", "local-key"),
+            models=["llama-2", "mistral", "codellama"],
+            priority=4,
+            timeout=60.0,
+            max_retries=1,
+            cost_per_token=0.000001
+        )
+
+        return providers
 
     async def _perform_health_check(self) -> None:
         """Perform health check on all components."""

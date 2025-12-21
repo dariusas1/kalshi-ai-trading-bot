@@ -15,7 +15,6 @@ Based on production best practices from the Kalshi trading infrastructure articl
 """
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
 from typing import Tuple, Optional
 import logging
 
@@ -120,7 +119,9 @@ class CircuitBreaker:
             return True
         
         try:
-            result = await self.db.update_circuit_breaker_hourly_loss(pnl, account_balance)
+            result = await self.db.update_circuit_breaker_hourly_loss(
+                pnl, account_balance, self.config.hourly_loss_threshold_pct
+            )
             
             hourly_loss = result.get("hourly_loss", 0)
             loss_pct = result.get("loss_pct", 0)

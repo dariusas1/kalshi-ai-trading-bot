@@ -56,7 +56,7 @@ class TradingConfig:
     ai_timeout: float = 45.0
     ai_max_retries: int = 3
     xai_models: List[str] = field(default_factory=lambda: ["grok-4.1", "grok-3"])
-    openai_models: List[str] = field(default_factory=lambda: ["gpt-4", "gpt-3.5-turbo"])
+    openai_models: List[str] = field(default_factory=lambda: ["gpt-5.2", "gpt-5"])
     
     # Position sizing (LEGACY - now using Kelly-primary approach)
     default_position_size: float = 3.0  # REDUCED: Now using Kelly Criterion as primary method (was 5%, now 3%)

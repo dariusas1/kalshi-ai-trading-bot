@@ -5,6 +5,7 @@ cost breakdown, agreement tracking, and dashboard data presentation.
 """
 
 import pytest
+import pytest_asyncio
 import asyncio
 import sqlite3
 from datetime import datetime, timedelta

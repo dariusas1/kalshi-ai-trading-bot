@@ -6,11 +6,10 @@ to provide seamless multi-provider redundancy, graceful degradation, and emergen
 """
 
 import asyncio
-import json
 import time
 import os
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 
 from src.intelligence.fallback_manager import (
@@ -82,8 +81,12 @@ class EnhancedAIClient(TradingLoggerMixin):
                 if log_query:
                     self.logger.info("Attempting completion with xAI")
                 return await self.xai_client.get_completion(
-                    prompt, model, temperature, max_tokens, 
-                    strategy, query_type, market_id, log_query
+                    prompt=prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    strategy=strategy or "unknown",
+                    query_type=query_type or "completion",
+                    market_id=market_id
                 )
             except Exception as e:
                 self.logger.warning(f"xAI completion failed: {e}, falling back to OpenAI")

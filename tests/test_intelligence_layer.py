@@ -1,4 +1,5 @@
 import pytest
+import pytest_asyncio
 from unittest.mock import MagicMock, AsyncMock, patch
 from src.intelligence.dual_ai_engine import DualAIDecisionEngine
 from src.intelligence.ensemble_engine import EnsembleEngine

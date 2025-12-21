@@ -34,25 +34,32 @@ def find_stubs_and_hardcoded(root_dir):
                              hardcoded.append((filepath, i+1, line.strip()))
 
                 for node in ast.walk(tree):
-                    if isinstance(node, ast.FunctionDef):
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        # Determine function type for reporting
+                        func_type = "async" if isinstance(node, ast.AsyncFunctionDef) else "sync"
+
                         # Check for empty/stub functions
                         if not node.body:
-                            stubs.append((filepath, node.lineno, node.name, "Empty body"))
+                            stubs.append((filepath, node.lineno, node.name, f"Empty body ({func_type})"))
                             continue
-                        
+
                         if len(node.body) == 1:
                             stmt = node.body[0]
                             if isinstance(stmt, ast.Pass):
-                                stubs.append((filepath, node.lineno, node.name, "Only pass"))
+                                stubs.append((filepath, node.lineno, node.name, f"Only pass ({func_type})"))
                             elif isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) and stmt.value.value is Ellipsis:
-                                stubs.append((filepath, node.lineno, node.name, "Only ..."))
+                                stubs.append((filepath, node.lineno, node.name, f"Only ... ({func_type})"))
+                            elif isinstance(stmt, ast.Raise) and isinstance(stmt.exc, ast.Name) and stmt.exc.id == "NotImplementedError":
+                                stubs.append((filepath, node.lineno, node.name, f"Only raise NotImplementedError ({func_type})"))
                             elif isinstance(stmt, ast.Return) and stmt.value is None:
-                                # return None is valid sometimes, but worth checking
-                                # stubs.append((filepath, node.lineno, node.name, "Only return None"))
-                                pass
+                                # return None is valid sometimes, but worth checking for async functions specifically
+                                if isinstance(node, ast.AsyncFunctionDef):
+                                    stubs.append((filepath, node.lineno, node.name, f"Only return None ({func_type})"))
+                                # For sync functions, return None can be valid
                             elif isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.Constant) and stmt.value.value is None:
                                 # checking for explicit return None again
-                                pass
+                                if isinstance(node, ast.AsyncFunctionDef):
+                                    stubs.append((filepath, node.lineno, node.name, f"Only explicit return None ({func_type})"))
                                 
     return stubs, hardcoded
 

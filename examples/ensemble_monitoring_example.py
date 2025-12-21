@@ -9,6 +9,7 @@ trading system to track model performance, analyze contributions, and generate a
 import asyncio
 from datetime import datetime, timedelta
 from typing import Dict, Any
+from src.intelligence.ensemble_monitor import EnsembleMonitor
 
 # Example of how to use EnsembleMonitor in a trading system
 async def ensemble_monitoring_example():
@@ -73,7 +74,6 @@ async def alert_monitoring_example():
     """
     Example showing how to monitor for performance alerts.
     """
-    from src.intelligence.ensemble_monitor import EnsembleMonitor
 
     monitor = EnsembleMonitor("trading_system.db")
     await monitor.initialize()
@@ -105,7 +105,6 @@ async def agreement_analysis_example():
     """
     Example showing ensemble agreement/disagreement analysis.
     """
-    from src.intelligence.ensemble_monitor import EnsembleMonitor
 
     monitor = EnsembleMonitor("trading_system.db")
     await monitor.initialize()
@@ -155,7 +154,6 @@ async def performance_tracking_example():
     """
     Example showing comprehensive performance tracking.
     """
-    from src.intelligence.ensemble_monitor import EnsembleMonitor
 
     monitor = EnsembleMonitor("trading_system.db")
     await monitor.initialize()
@@ -209,8 +207,6 @@ def integration_with_existing_system():
 
 async def enhanced_ensemble_decide(market_id: str, potential_investment: float):
     """Enhanced decision making with monitoring integration."""
-
-    from src.intelligence.ensemble_monitor import EnsembleMonitor
 
     # Initialize monitor if not already done
     if not hasattr(enhanced_ensemble_decide, 'monitor'):
