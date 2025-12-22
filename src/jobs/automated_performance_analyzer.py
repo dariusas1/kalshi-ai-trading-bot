@@ -26,7 +26,7 @@ from src.clients.xai_client import XAIClient
 from src.utils.database import DatabaseManager, Position, TradeLog
 from src.config.settings import settings
 from src.utils.logging_setup import get_trading_logger
-from xai_sdk.chat import user as xai_user
+
 
 
 class Priority(Enum):
@@ -181,18 +181,19 @@ class AutomatedPerformanceAnalyzer:
         
         if active_positions:
             try:
-                # Extract tickers
-                tickers = [p['ticker'] for p in active_positions]
-                
-                # Fetch market data in batches (Kalshi API limit might apply, but 100 is usually safe)
-                # We'll stick to 50 per batch to be safe
+                # Fetch individual market data for each position to get live prices
+                # Using get_market(ticker) instead of batch get_markets which may not return prices correctly
                 markets_map = {}
-                batch_size = 50
-                for i in range(0, len(tickers), batch_size):
-                    batch_tickers = tickers[i:i + batch_size]
-                    markets_response = await self.kalshi_client.get_markets(tickers=batch_tickers)
-                    for market in markets_response.get('markets', []):
-                        markets_map[market['ticker']] = market
+                for position in active_positions:
+                    ticker = position['ticker']
+                    try:
+                        market_response = await self.kalshi_client.get_market(ticker)
+                        # get_market returns the market directly, not wrapped in 'markets' array
+                        market_data = market_response.get('market', market_response)
+                        if market_data:
+                            markets_map[ticker] = market_data
+                    except Exception as e:
+                        self.logger.debug(f"Failed to fetch market {ticker}: {e}")
                 
                 # Calculate value
                 for position in active_positions:
@@ -202,17 +203,30 @@ class AutomatedPerformanceAnalyzer:
                     val = 0.0
                     
                     if market:
-                        yes_price = market.get('yes_price')
-                        no_price = market.get('no_price')
+                        # Kalshi API uses these fields for prices (in cents):
+                        # - last_price: Last traded price
+                        # - previous_yes_ask / previous_yes_bid: Previous Yes prices
+                        # - no_ask / no_bid: Current No prices
                         
-                        # Determine price based on side
-                        # If position > 0 (Long Yes), use yes_price
-                        # If position < 0 (Short Yes/Long No), use no_price
-                        live_price = None
+                        # Get the best available price based on position direction
                         if position.get('position', 0) > 0:
-                            live_price = yes_price
+                            # Long Yes position - use last_price or mid of previous yes bid/ask
+                            live_price = market.get('last_price')
+                            if live_price is None:
+                                yes_bid = market.get('previous_yes_bid')
+                                yes_ask = market.get('previous_yes_ask')
+                                if yes_bid is not None and yes_ask is not None:
+                                    live_price = (yes_bid + yes_ask) / 2
                         else:
-                            live_price = no_price
+                            # Short Yes / Long No position - use no price
+                            no_bid = market.get('no_bid')
+                            no_ask = market.get('no_ask')
+                            if no_bid is not None and no_ask is not None:
+                                live_price = (no_bid + no_ask) / 2
+                            else:
+                                # Fallback: no price = 100 - yes price
+                                last_price = market.get('last_price')
+                                live_price = 100 - last_price if last_price is not None else None
                             
                         if live_price is not None:
                             val = (count * live_price) / 100.0
@@ -531,7 +545,7 @@ End with a numbered list of SPECIFIC CHANGES TO IMPLEMENT.
 
         try:
             # Use raw completion to get unprocessed text
-            messages = [xai_user(analysis_prompt)]
+            messages = [{"role": "user", "content": analysis_prompt}]
             response_content, cost = await self.xai_client._make_completion_request(
                 messages, 
                 max_tokens=settings.trading.ai_max_tokens,

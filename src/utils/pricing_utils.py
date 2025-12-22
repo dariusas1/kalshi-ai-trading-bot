@@ -95,6 +95,12 @@ class PriceSelector:
         """
         Get the appropriate price for order execution.
 
+        For IMMEDIATE execution (crossing the spread):
+        - To BUY: Use ASK price (the price sellers are offering)
+        - To SELL: Use BID price (the price buyers are offering)
+        
+        This is the "taker" logic - you cross the spread to get filled immediately.
+
         Args:
             market_info: Market information dictionary
             side: "yes" or "no"
@@ -107,27 +113,28 @@ class PriceSelector:
         bid_key = f"{side}_bid"
         ask_key = f"{side}_ask"
 
-        # Get base price (stored in database as dollars)
-        base_price_dollars = market_info.get(price_key, 0.50)  # Default to $0.50
-        base_price_cents = PriceConverter.dollars_to_cents(base_price_dollars)
+        # Get base price as fallback
+        base_price = market_info.get(price_key, 50)  # API returns in cents
+        if base_price < 1:  # If it's in dollars (0.xx), convert to cents
+            base_price = int(base_price * 100)
 
         if action == "buy":
-            # For buying, use BID price (price to buy at)
-            bid_price = market_info.get(bid_key, 0)
-            if bid_price > 0:
-                return bid_price  # API returns bid in cents
-            else:
-                logger.info(f"No {bid_key} found, using base price {base_price_cents} for buy order")
-                return base_price_cents
-
-        else:  # sell
-            # For selling, use ASK price (price to sell at)
+            # To BUY immediately, pay the ASK price (what sellers are asking)
             ask_price = market_info.get(ask_key, 0)
             if ask_price > 0:
                 return ask_price  # API returns ask in cents
             else:
-                logger.info(f"No {ask_key} found, using base price {base_price_cents} for sell order")
-                return base_price_cents
+                logger.info(f"No {ask_key} found, using base price {base_price} for buy order")
+                return base_price
+
+        else:  # sell
+            # To SELL immediately, accept the BID price (what buyers are offering)
+            bid_price = market_info.get(bid_key, 0)
+            if bid_price > 0:
+                return bid_price  # API returns bid in cents
+            else:
+                logger.info(f"No {bid_key} found, using base price {base_price} for sell order")
+                return base_price
 
     @staticmethod
     def get_mid_price(market_info: Dict[str, Any], side: str) -> int:

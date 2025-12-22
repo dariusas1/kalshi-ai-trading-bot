@@ -100,6 +100,29 @@ class XAIProvider(BaseProvider):
         super().__init__(config)
         self.client = None
 
+    def _convert_message_to_sdk(self, message: Dict[str, str]) -> Any:
+        """
+        Convert a dictionary message to xAI SDK Message object.
+        
+        The xAI SDK's chat.append() method only accepts chat_pb2.Message objects
+        (created via helper functions like user(), system(), assistant()) or
+        Response objects from previous interactions.
+        """
+        from xai_sdk.chat import user as xai_user, system as xai_system, assistant as xai_assistant
+        
+        role = message.get("role", "user").lower()
+        content = message.get("content", "")
+        
+        if role == "user":
+            return xai_user(content)
+        elif role == "system":
+            return xai_system(content)
+        elif role == "assistant":
+            return xai_assistant(content)
+        else:
+            # Default to user message for unknown roles
+            return xai_user(content)
+
     async def initialize(self) -> bool:
         """Initialize xAI client."""
         try:
@@ -130,9 +153,10 @@ class XAIProvider(BaseProvider):
                 max_tokens=request.max_tokens or 4000
             )
 
-            # Add messages
+            # Add messages - CONVERT dict messages to SDK format
             for message in request.messages:
-                chat.append(message)
+                sdk_message = self._convert_message_to_sdk(message)
+                chat.append(sdk_message)
 
             # Sample response
             response = await chat.sample()
@@ -171,7 +195,8 @@ class XAIProvider(BaseProvider):
                 temperature=0.1,
                 max_tokens=10
             )
-            chat.append({"role": "user", "content": "test"})
+            from xai_sdk.chat import user as xai_user
+            chat.append(xai_user("test"))
             response = await chat.sample()
 
             return bool(response and response.content)

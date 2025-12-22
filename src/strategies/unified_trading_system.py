@@ -22,7 +22,7 @@ Key innovations:
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Union
 from dataclasses import dataclass
 
@@ -159,7 +159,7 @@ class UnifiedAdvancedTradingSystem:
         
         # OLD HARDCODED WAY (REMOVED):
         # self.total_capital = getattr(settings.trading, 'total_capital', 10000)
-        self.last_rebalance = datetime.now()
+        self.last_rebalance = datetime.now(timezone.utc)
         self.system_metrics = {}
         
         if self.ensemble_coordinator:
@@ -649,11 +649,28 @@ class UnifiedAdvancedTradingSystem:
                     # FIXED: Extract from nested 'market' object
                     market_info = market_data.get('market', {})
                     
-                    # Get price for the intended side (already determined above)
+                    # Get price for the intended side using actual Kalshi API fields
+                    # Kalshi API provides: last_price, no_bid, no_ask, previous_yes_bid, previous_yes_ask
                     if intended_side == "YES":
-                        price = market_info.get('yes_price', 50) / 100
+                        # Use last_price for YES side
+                        price_cents = market_info.get('last_price')
+                        if price_cents is None:
+                            # Fallback to previous_yes_bid/ask midpoint
+                            yes_bid = market_info.get('previous_yes_bid', 50)
+                            yes_ask = market_info.get('previous_yes_ask', 50)
+                            price_cents = (yes_bid + yes_ask) / 2
+                        price = price_cents / 100
                     else:
-                        price = market_info.get('no_price', 50) / 100
+                        # Use no_bid/no_ask midpoint for NO side, or calculate from last_price
+                        no_bid = market_info.get('no_bid')
+                        no_ask = market_info.get('no_ask')
+                        if no_bid is not None and no_ask is not None:
+                            price_cents = (no_bid + no_ask) / 2
+                        else:
+                            # Fallback: NO price = 100 - YES price
+                            last_price = market_info.get('last_price', 50)
+                            price_cents = 100 - last_price
+                        price = price_cents / 100
                     
                     # Calculate quantity
                     if price <= 0:
@@ -688,7 +705,7 @@ class UnifiedAdvancedTradingSystem:
                         side=intended_side,
                         entry_price=price,
                         quantity=quantity,
-                        timestamp=datetime.now(),
+                        timestamp=datetime.now(timezone.utc),
                         rationale=f"Portfolio optimization allocation: {allocation_fraction:.1%} of capital. Edge: {opportunity.edge:.3f}, Confidence: {opportunity.confidence:.3f}, Stop: {exit_levels['stop_loss_pct']}%",
                         confidence=opportunity.confidence,
                         live=False,  # Will be set to True after execution
@@ -965,7 +982,7 @@ class UnifiedAdvancedTradingSystem:
                         self.logger.info(f"   • {detail}")
             
             # Check if rebalancing is needed
-            time_since_rebalance = datetime.now() - self.last_rebalance
+            time_since_rebalance = datetime.now(timezone.utc) - self.last_rebalance
             if time_since_rebalance.total_seconds() > (self.config.rebalance_frequency_hours * 3600):
                 self.logger.info("🔄 Portfolio rebalancing triggered")
                 
@@ -982,7 +999,7 @@ class UnifiedAdvancedTradingSystem:
                 else:
                     self.logger.info(f"⚖️ No rebalancing needed: {rebalance_result['summary']}")
                 
-                self.last_rebalance = datetime.now()
+                self.last_rebalance = datetime.now(timezone.utc)
             
             # Performance monitoring
             if results.portfolio_sharpe_ratio < self.config.target_sharpe_ratio * 0.5:

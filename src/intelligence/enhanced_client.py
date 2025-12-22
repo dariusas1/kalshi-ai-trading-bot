@@ -124,7 +124,7 @@ class EnhancedAIClient(TradingLoggerMixin):
         self.config = config or EnhancedConfig()
 
         # Initialize existing clients for compatibility
-        self.xai_client = XAIClient(db_manager, kalshi_client)
+        self.xai_client = XAIClient(db_manager=db_manager, kalshi_client=kalshi_client)
         self.openai_client = OpenAIClient()
 
         # Initialize provider configurations
@@ -197,18 +197,18 @@ class EnhancedAIClient(TradingLoggerMixin):
                 max_retries=2,
                 cost_per_token=0.000025
             )
-
-        # Local provider
-        providers["local"] = ProviderConfig(
-            name="local",
-            endpoint="http://localhost:11434/v1",  # Ollama default
-            api_key=os.getenv("OLLAMA_API_KEY", "local-key"),  # Local provider doesn't strictly need a key
-            models=["llama-2", "mistral", "codellama"],
-            priority=4,
-            timeout=60.0,
-            max_retries=1,
-            cost_per_token=0.000001
-        )
+        # Local provider - only add if explicitly enabled
+        if getattr(settings.trading, 'ensemble_enable_local_models', False):
+            providers["local"] = ProviderConfig(
+                name="local",
+                endpoint="http://localhost:11434/v1",  # Ollama default
+                api_key=os.getenv("OLLAMA_API_KEY", "local-key"),  # Local provider doesn't strictly need a key
+                models=["llama-2", "mistral", "codellama"],
+                priority=4,
+                timeout=60.0,
+                max_retries=1,
+                cost_per_token=0.000001
+            )
 
         return providers
 
@@ -219,7 +219,11 @@ class EnhancedAIClient(TradingLoggerMixin):
                 results = await self.provider_manager.initialize_all_providers()
                 self.logger.info("Provider initialization results", results=results)
 
-                # Start health monitoring
+                # Run an immediate health check to populate initial status
+                if self.fallback_manager:
+                    await self._check_system_health()
+
+                # Start health monitoring in background
                 if self.config.enable_fallback:
                     asyncio.create_task(self._start_health_monitoring())
 
@@ -242,7 +246,15 @@ class EnhancedAIClient(TradingLoggerMixin):
             return
 
         try:
-            health_status = await self.fallback_manager.check_provider_health("xai") if "xai" in self.providers else None
+            # Check health of ALL configured providers, not just xAI
+            for provider_name in self.providers:
+                try:
+                    await self.fallback_manager.check_provider_health(provider_name)
+                except Exception as provider_error:
+                    self.logger.warning(
+                        f"Health check failed for provider {provider_name}: {provider_error}"
+                    )
+
             system_status = await self.fallback_manager.get_system_status()
 
             self.last_health_check = datetime.now()
@@ -407,7 +419,8 @@ class EnhancedAIClient(TradingLoggerMixin):
             "no_price": no_price,
             "volume": volume,
             "days_to_expiry": days_to_expiry,
-            "news_summary": news_summary[:1000],  # Limit news length
+            "news_summary": news_summary[:1000] if news_summary else "No recent news available.",
+            "ml_context": "No technical analysis available.",  # Default value for ml_context
             "cash": portfolio_data.get("balance", 0),
             "max_trade_value": max_trade_value,
             "max_position_pct": settings.trading.max_position_size_pct,

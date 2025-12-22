@@ -26,7 +26,7 @@ import argparse
 import time
 import signal
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from src.jobs.trade import run_trading_job
@@ -297,7 +297,8 @@ class BeastModeBot:
                 try:
                     if settings.trading.max_trades_per_hour:
                         recent_trades = await db_manager.get_recent_trades(limit=200)
-                        one_hour_ago = datetime.now() - timedelta(hours=1)
+                        one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+                        one_hour_ago_naive = datetime.now() - timedelta(hours=1)  # Fallback for naive datetimes
                         trades_last_hour = 0
                         for trade in recent_trades:
                             ts = trade.get("exit_timestamp") or trade.get("timestamp")
@@ -308,8 +309,19 @@ class BeastModeBot:
                                     continue
                             else:
                                 ts_dt = ts
-                            if ts_dt and ts_dt >= one_hour_ago:
-                                trades_last_hour += 1
+                            if ts_dt:
+                                # Handle both timezone-aware and naive datetime comparisons
+                                try:
+                                    if ts_dt.tzinfo is not None:
+                                        if ts_dt >= one_hour_ago:
+                                            trades_last_hour += 1
+                                    else:
+                                        if ts_dt >= one_hour_ago_naive:
+                                            trades_last_hour += 1
+                                except TypeError:
+                                    # Fallback: compare as naive
+                                    if ts_dt.replace(tzinfo=None) >= one_hour_ago_naive:
+                                        trades_last_hour += 1
 
                         if trades_last_hour >= settings.trading.max_trades_per_hour:
                             self.logger.warning(

@@ -16,7 +16,7 @@ import re
 from json_repair import repair_json
 
 from xai_sdk import AsyncClient
-from xai_sdk.chat import user as xai_user
+from xai_sdk.chat import user as xai_user, system as xai_system, assistant as xai_assistant
 from xai_sdk.search import SearchParameters
 
 from src.config.settings import settings
@@ -182,8 +182,21 @@ class XAIClient(TradingLoggerMixin):
                     daily_limit=self.daily_tracker.daily_limit
                 )
                 return True
+            
+            # CHECK FOR FALSE POSITIVE: If cost is actually below limit, reset exhausted state
+            # This handles cases where limit was raised or pickle file was stale
+            if self.daily_tracker.total_cost < self.daily_tracker.daily_limit:
+                if not self.is_api_exhausted:  # Only reset if not blocked by API 429s
+                    self.daily_tracker.is_exhausted = False
+                    self._save_daily_tracker()
+                    self.logger.info(
+                        "Resumed AI trading - cost below limit (false positive fixed)",
+                        daily_cost=self.daily_tracker.total_cost,
+                        daily_limit=self.daily_tracker.daily_limit
+                    )
+                    return True
 
-            # Still the same day and exhausted
+            # Still the same day and genuinely exhausted
             self.logger.info(
                 "Daily AI limit reached - request skipped",
                 daily_cost=self.daily_tracker.total_cost,
@@ -1185,6 +1198,36 @@ If no current information is available, clearly state that and provide only know
 
         return SIMPLIFIED_PROMPT_TPL.format(**prompt_params)
 
+    def _convert_message_to_sdk(self, message: Dict) -> Any:
+        """
+        Convert a dictionary message to xAI SDK Message object.
+        
+        The xAI SDK's chat.append() method only accepts chat_pb2.Message objects
+        (created via helper functions like user(), system(), assistant()) or
+        Response objects from previous interactions. This method converts dict
+        messages in the format {"role": "user", "content": "..."} to the proper
+        SDK message format.
+        
+        Args:
+            message: Dictionary with 'role' and 'content' keys
+            
+        Returns:
+            xAI SDK Message object (chat_pb2.Message)
+        """
+        role = message.get("role", "user").lower()
+        content = message.get("content", "")
+        
+        if role == "user":
+            return xai_user(content)
+        elif role == "system":
+            return xai_system(content)
+        elif role == "assistant":
+            return xai_assistant(content)
+        else:
+            # Default to user message for unknown roles
+            self.logger.warning(f"Unknown message role '{role}', defaulting to user")
+            return xai_user(content)
+
     async def _make_completion_request(
         self,
         messages: List[Dict],
@@ -1236,9 +1279,10 @@ If no current information is available, clearly state that and provide only know
                     max_tokens=max_tokens
                 )
 
-                # Add all messages to the chat
+                # Add all messages to the chat - CONVERT dict messages to SDK format
                 for message in messages:
-                    chat.append(message)
+                    sdk_message = self._convert_message_to_sdk(message)
+                    chat.append(sdk_message)
 
                 # Sample the response
                 response = await chat.sample()
@@ -1339,6 +1383,10 @@ If no current information is available, clearly state that and provide only know
                     await self._handle_resource_exhausted_error(str(e))
                     return None, 0.0
 
+                # Get detailed error information for better troubleshooting
+                error_type = type(e).__name__
+                error_str = str(e) if str(e) else "No error message"
+
                 # Check for specific gRPC error indicating deadline exceeded
                 is_deadline_error = "DEADLINE_EXCEEDED" in str(e)
 
@@ -1346,12 +1394,14 @@ If no current information is available, clearly state that and provide only know
                 is_rate_limit = any(indicator in str(e).lower() for indicator in ["rate limit", "quota", "429", "too many"])
 
                 self.logger.warning(
-                    f"Error on attempt {attempt + 1}: {str(e)}",
+                    f"Error on attempt {attempt + 1}: [{error_type}] {error_str}",
                     model=model_to_use,
                     attempt=attempt + 1,
                     max_retries=max_retries,
                     is_deadline_error=is_deadline_error,
-                    is_rate_limit=is_rate_limit
+                    is_rate_limit=is_rate_limit,
+                    error_type=error_type,
+                    error_args=getattr(e, 'args', None)
                 )
 
                 if attempt == max_retries - 1:
@@ -1362,7 +1412,12 @@ If no current information is available, clearly state that and provide only know
                         if fallback_result:
                             return fallback_result
 
-                    self.logger.error(f"Error in get_completion: {str(e)}")
+                    self.logger.error(
+                        f"Error in get_completion: [{error_type}] {error_str}",
+                        error_type=error_type,
+                        error_repr=repr(e),
+                        model=model_to_use
+                    )
                     return None, 0.0  # Return None instead of raising
 
                 # Add delay before retry
@@ -1450,7 +1505,7 @@ If no current information is available, clearly state that and provide only know
         Returns the raw response text or None if failed/exhausted.
         """
         try:
-            messages = [xai_user(prompt)]
+            messages = [{"role": "user", "content": prompt}]
             response_content, cost = await self._make_completion_request(
                 messages,
                 max_tokens=max_tokens,

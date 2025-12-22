@@ -328,7 +328,8 @@ async def make_decision_for_market(
                 dual_engine = DualAIDecisionEngine(
                     xai_client=xai_client,
                     openai_client=openai_client,
-                    db_manager=db_manager
+                    db_manager=db_manager,
+                    kalshi_client=kalshi_client
                 )
                 
                 dual_decision = await dual_engine.get_dual_ai_decision(

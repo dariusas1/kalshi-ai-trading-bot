@@ -48,9 +48,17 @@ async def execute_position(
         live_mode = False
 
     # 🚨 CRITICAL: Validate ticker before execution
+    # Block MULTIGAME combo markets (complex settlement) but allow SINGLEGAME markets
     if position.market_id.startswith("KXMV"):
-        logger.error(f"❌ BLOCKED: Cannot execute on KXMV combo market: {position.market_id}")
-        return False
+        # Allow single-game markets (e.g., KXMVENFLSINGLEGAME, KXMVNBASINGLEGAME)
+        if "SINGLEGAME" in position.market_id:
+            logger.info(f"✅ ALLOWED: Single game market: {position.market_id}")
+        elif "MULTIGAME" in position.market_id:
+            logger.warning(f"⏭️ SKIPPED: Multi-game combo market: {position.market_id}")
+            return False
+        else:
+            # Unknown KXMV pattern - allow with warning
+            logger.warning(f"⚠️ Unknown KXMV pattern, proceeding: {position.market_id}")
     
     if not position.market_id or len(position.market_id) < 5:
         logger.error(f"❌ BLOCKED: Invalid market_id: {position.market_id}")
@@ -80,16 +88,16 @@ async def execute_position(
                 return False
             
             # 🎯 SMART ORDER TYPE SELECTION
-            # IOC for high edge (>10%) - urgent entry needed
-            # Market orders for standard entries
-            use_ioc = edge > 0.10 and settings.trading.algorithmic_execution
-            time_in_force = "immediate_or_cancel" if use_ioc else None  # API requires full name, not 'ioc'
-            order_type = "market"
+            # For HIGH EDGE (>10%): Use limit orders at ask price for guaranteed price
+            # For STANDARD trades: Use true market orders (no price) for immediate execution
+            use_limit_for_high_edge = edge > 0.10 and settings.trading.algorithmic_execution
             
-            if use_ioc:
-                logger.info(f"📈 HIGH EDGE ({edge:.1%}) - Using IOC order for {position.market_id}")
+            if use_limit_for_high_edge:
+                logger.info(f"📈 HIGH EDGE ({edge:.1%}) - Using limit order at ask for {position.market_id}")
+                order_type = "limit"
             else:
-                logger.info(f"📊 Standard edge ({edge:.1%}) - Using market order for {position.market_id}")
+                logger.info(f"📊 Standard edge ({edge:.1%}) - Using MARKET order for {position.market_id}")
+                order_type = "market"
             
             order_args = {
                 "ticker": position.market_id,
@@ -100,21 +108,23 @@ async def execute_position(
                 "type_": order_type
             }
             
-            # 🔧 FIX: Use proper bid/ask pricing logic for order execution
-            buffer_cents = getattr(settings.trading, "market_order_price_buffer_cents", 2)
-            market_data = await kalshi_client.get_market(position.market_id)
-            market_info = market_data.get("market", {}) if market_data else {}
+            # Only add price for LIMIT orders - market orders fill at best available
+            if order_type == "limit":
+                buffer_cents = getattr(settings.trading, "market_order_price_buffer_cents", 2)
+                market_data = await kalshi_client.get_market(position.market_id)
+                market_info = market_data.get("market", {}) if market_data else {}
 
-            # Create order price with proper bid/ask logic and safety buffer
-            order_price = create_order_price(market_info, position, buffer_cents, max_price=99)
+                # Create order price with proper bid/ask logic and safety buffer
+                order_price = create_order_price(market_info, position, buffer_cents, max_price=99)
 
-            if position.side.lower() == "yes":
-                order_args["yes_price"] = order_price
-            else:
-                order_args["no_price"] = order_price
+                if position.side.lower() == "yes":
+                    order_args["yes_price"] = order_price
+                else:
+                    order_args["no_price"] = order_price
+                
+                logger.info(f"📝 Limit order price: {order_price}¢ for {position.side.upper()}")
             
-            if time_in_force:
-                order_args["time_in_force"] = time_in_force
+            # Note: For market orders, we don't specify price - Kalshi fills at best available
 
             order_response = await kalshi_client.place_order(**order_args)
             order_info = order_response.get('order', {})
@@ -145,10 +155,12 @@ async def execute_position(
                 logger.info(f"✅ Order FILLED for {position.market_id} at ${fill_price:.2f}")
                 return True
             elif order_status in ['pending', 'resting', 'canceled']:
-                # IOC order may be canceled if not immediately filled
-                if use_ioc and order_status == 'canceled':
-                    logger.info(f"⚡ IOC order canceled (no immediate fill) - retrying with market order...")
-                    # Retry with market order as fallback
+                # Limit order may not fill immediately
+                if use_limit_for_high_edge and order_status == 'resting':
+                    logger.info(f"⚡ Limit order resting - will wait for fill or timeout...")
+                elif order_status == 'canceled':
+                    logger.info(f"⚠️ Order canceled (no fill) - retrying with true market order...")
+                    # Retry with TRUE market order (no price) as fallback
                     retry_order_id = str(uuid.uuid4())
                     retry_args = {
                         "ticker": position.market_id,
@@ -157,15 +169,11 @@ async def execute_position(
                         "action": "buy",
                         "count": position.quantity,
                         "type_": "market"
+                        # NO PRICE - true market order fills at best available
                     }
-                    # Add required price for market order
-                    if position.side.lower() == "yes":
-                        retry_args["yes_price"] = order_args.get("yes_price", 99)
-                    else:
-                        retry_args["no_price"] = order_args.get("no_price", 99)
                     retry_response = await kalshi_client.place_order(**retry_args)
                     retry_info = retry_response.get('order', {})
-                    if retry_info.get('status') == 'filled':
+                    if retry_info.get('status') in ['filled', 'executed']:
                         fill_price = retry_info.get('yes_price', retry_info.get('no_price', position.entry_price * 100)) / 100
                         await db_manager.update_position_to_live(position.id, fill_price)
                         logger.info(f"✅ FALLBACK market order FILLED for {position.market_id}")
@@ -206,7 +214,7 @@ async def execute_position(
                 except Exception as cancel_err:
                     logger.warning(f"Could not cancel order: {cancel_err}")
                 
-                # Market order fallback
+                # Market order fallback (TRUE market order - no price)
                 fallback_order_id = str(uuid.uuid4())
                 fallback_args = {
                     "ticker": position.market_id,
@@ -215,15 +223,11 @@ async def execute_position(
                     "action": "buy",
                     "count": position.quantity,
                     "type_": "market"
+                    # NO PRICE - true market order fills at best available
                 }
-                # Add required price for market order
-                if position.side.lower() == "yes":
-                    fallback_args["yes_price"] = order_args.get("yes_price", 99)
-                else:
-                    fallback_args["no_price"] = order_args.get("no_price", 99)
                 fallback_response = await kalshi_client.place_order(**fallback_args)
                 fallback_info = fallback_response.get('order', {})
-                if fallback_info.get('status') == 'filled':
+                if fallback_info.get('status') in ['filled', 'executed']:
                     fill_price = fallback_info.get('yes_price', fallback_info.get('no_price', position.entry_price * 100)) / 100
                     await db_manager.update_position_to_live(position.id, fill_price)
                     logger.info(f"✅ FALLBACK market order FILLED for {position.market_id} at ${fill_price:.2f}")

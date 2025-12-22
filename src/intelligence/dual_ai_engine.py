@@ -252,11 +252,10 @@ Critically examine the claimed edge:
 - You genuinely believe the forecaster is likely correct
 
 **REJECT if:**
-- Significant cognitive biases detected
-- Edge is vague or non-existent ("I disagree with market" is NOT an edge)
-- Steel-man argument for opposite side is stronger than forecaster's case
-- Resolution criteria were not properly understood
-- Confidence level seems unjustified
+- Significant cognitive biases detected that invalidate the thesis
+- Edge is non-existent AND the opportunity is negative EV
+- Steel-man argument for opposite side is CLEARLY SUPERIOR and refutes the thesis
+- PROPER REJECTION: Don't reject just for minor formatting or phrasing. If the trade is positive EV but the edge is poorly phrased, APPROVE and suggest better phrasing.
 
 **If the forecaster recommends SKIP:** Usually agree unless you see a clear opportunity they missed.
 
@@ -293,7 +292,7 @@ class DualAIDecisionEngine(TradingLoggerMixin):
     3. Only executing trades that both AIs agree on
     """
 
-    def __init__(self, xai_client=None, openai_client=None, db_manager=None):
+    def __init__(self, xai_client=None, openai_client=None, db_manager=None, kalshi_client=None):
         """
         Initialize the dual-AI decision engine.
 
@@ -301,10 +300,12 @@ class DualAIDecisionEngine(TradingLoggerMixin):
             xai_client: XAIClient for Grok forecasting
             openai_client: OpenAIClient for GPT critic review
             db_manager: Optional DatabaseManager for logging
+            kalshi_client: Optional KalshiClient for ML predictions
         """
         self.xai_client = xai_client
         self.openai_client = openai_client
         self.db_manager = db_manager
+        self.kalshi_client = kalshi_client
 
         # If clients not provided, create them lazily
         self._xai_initialized = xai_client is not None
@@ -316,7 +317,7 @@ class DualAIDecisionEngine(TradingLoggerMixin):
         """Lazily initialize clients if not provided."""
         if not self._xai_initialized:
             from src.clients.xai_client import XAIClient
-            self.xai_client = XAIClient(db_manager=self.db_manager)
+            self.xai_client = XAIClient(db_manager=self.db_manager, kalshi_client=self.kalshi_client)
             self._xai_initialized = True
 
         if not self._openai_initialized:
@@ -486,10 +487,13 @@ class DualAIDecisionEngine(TradingLoggerMixin):
                 max_trade_value=portfolio_data.get('max_trade_value', 100)
             )
 
-            # Call Grok via XAI client
+            # Call Grok via XAI client - handle both EnhancedAIClient wrapper and direct XAIClient
             messages = [{"role": "user", "content": prompt}]
-
-            response_text, cost = await self.xai_client._make_completion_request(
+            
+            # Get the actual XAI client (may be wrapped in EnhancedAIClient)
+            actual_xai_client = getattr(self.xai_client, 'xai_client', self.xai_client)
+            
+            response_text, cost = await actual_xai_client._make_completion_request(
                 messages=messages,
                 temperature=0.2,  # Low temperature for more consistent forecasts
                 max_tokens=2000
@@ -560,10 +564,13 @@ class DualAIDecisionEngine(TradingLoggerMixin):
                 reasoning=forecast.reasoning
             )
 
-            # Call GPT via OpenAI client
+            # Call GPT via OpenAI client - handle both EnhancedAIClient wrapper and direct OpenAIClient
             messages = [{"role": "user", "content": prompt}]
-
-            response_text, cost = await self.openai_client._make_completion_request(
+            
+            # Get the actual OpenAI client (may be wrapped in EnhancedAIClient)
+            actual_openai_client = getattr(self.openai_client, 'openai_client', self.openai_client)
+            
+            response_text, cost = await actual_openai_client._make_completion_request(
                 messages=messages,
                 temperature=0.3,  # Slightly higher for more critical thinking
                 max_tokens=1500

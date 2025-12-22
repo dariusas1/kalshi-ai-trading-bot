@@ -1133,6 +1133,12 @@ async def create_market_opportunities_from_markets(
 
     for market in markets:
         try:
+            # 🚫 Skip MULTIGAME combo markets early (blocked in execute_position anyway)
+            # This saves AI credits by not analyzing markets that will be rejected
+            if "MULTIGAME" in market.market_id:
+                logger.info(f"⏭️ Skipping {market.market_id} - MULTIGAME combo markets blocked")
+                continue
+
             # Get current market data
             market_data = await kalshi_client.get_market(market.market_id)
             if not market_data:
@@ -1200,12 +1206,41 @@ async def create_market_opportunities_from_markets(
             volatility = np.sqrt(market_prob * (1 - market_prob))
             max_loss = market_prob if edge > 0 else (1 - market_prob)
 
-            # Time to expiry
-            time_to_expiry = 30.0  # Default 30 days
-            if hasattr(market, 'expiration_ts') and market.expiration_ts:
-                import time
+            # Time to expiry - PRIORITIZE expected_expiration_time (actual event time) over close_time (fallback)
+            # close_time is often weeks away as a fallback, but expected_expiration_time is the real event time
+            time_to_expiry = 30.0  # Default fallback (will be filtered out by expiry check)
+            import time
+            from datetime import datetime as dt
+            
+            # Check for event-related time fields in priority order:
+            # 1. expected_expiration_time - the actual expected event resolution time
+            # 2. expiration_time - when the market expires
+            # 3. close_time - fallback market closure (often far in future)
+            time_field_used = None
+            expiry_time_str = None
+            
+            for field_name in ['expected_expiration_time', 'expiration_time', 'close_time']:
+                expiry_time_str = market_info.get(field_name)
+                if expiry_time_str:
+                    time_field_used = field_name
+                    break
+            
+            if expiry_time_str:
+                try:
+                    # Parse ISO 8601 timestamp
+                    if expiry_time_str.endswith('Z'):
+                        expiry_time_str = expiry_time_str[:-1] + '+00:00'
+                    expiry_dt = dt.fromisoformat(expiry_time_str)
+                    now_dt = dt.now(expiry_dt.tzinfo) if expiry_dt.tzinfo else dt.utcnow()
+                    time_to_expiry = (expiry_dt - now_dt).total_seconds() / 86400
+                    time_to_expiry = max(0.01, time_to_expiry)  # At least ~15 minutes
+                    logger.info(f"📅 {market.market_id}: Event in {time_to_expiry:.2f} days (from {time_field_used}: {expiry_time_str})")
+                except Exception as parse_error:
+                    logger.warning(f"Could not parse {time_field_used} '{expiry_time_str}': {parse_error}")
+            elif hasattr(market, 'expiration_ts') and market.expiration_ts and market.expiration_ts > 0:
+                # Fallback to stored expiration timestamp
                 time_to_expiry = (market.expiration_ts - time.time()) / 86400
-                time_to_expiry = max(0.1, time_to_expiry)
+                time_to_expiry = max(0.01, time_to_expiry)
 
             # Apply Grok4 edge filtering - 10% minimum edge requirement
             from src.utils.edge_filter import EdgeFilter
@@ -1286,14 +1321,35 @@ async def _evaluate_immediate_trade(
         )
 
         # Additional criteria for immediate execution - CONSERVATIVE
+        # Check if opportunity meets edge filtering requirements
+        from src.utils.edge_filter import get_minimum_edge_for_confidence
+        min_edge_required = get_minimum_edge_for_confidence(opportunity.confidence)
+
         strong_opportunity = (
             should_trade and
-            edge_result.edge_percentage >= 0.10 and  # RESTORED: 10% edge requirement
-            opportunity.confidence >= 0.60 and       # RESTORED: 60% confidence
+            edge_result.edge_percentage >= min_edge_required and  # DYNAMIC: Use edge filter thresholds
+            opportunity.confidence >= 0.50 and       # UPDATED: Use edge filter minimum confidence
             opportunity.expected_return >= 0.05      # RESTORED: 5% expected return
         )
 
+        logger.info(
+            f"🔍 Immediate trade check for {opportunity.market_id}: "
+            f"should_trade={should_trade}, edge={edge_result.edge_percentage:.1%}(need>={min_edge_required:.1%}), "
+            f"confidence={opportunity.confidence:.1%}(need>=50%), "
+            f"expected_return={opportunity.expected_return:.1%}(need>=5%)"
+        )
+
         if not strong_opportunity:
+            which_failed = []
+            if not should_trade:
+                which_failed.append(f"should_trade=False ({trade_reason})")  # Include the reason!
+            if edge_result.edge_percentage < min_edge_required:
+                which_failed.append(f"edge {edge_result.edge_percentage:.1%} < {min_edge_required:.1%}")
+            if opportunity.confidence < 0.50:
+                which_failed.append(f"confidence {opportunity.confidence:.1%} < 50%")
+            if opportunity.expected_return < 0.05:
+                which_failed.append(f"expected_return {opportunity.expected_return:.1%} < 5%")
+            logger.info(f"⏭️ Not strong enough for immediate trade: {', '.join(which_failed)}")
             return  # Not strong enough for immediate action
 
         # Check position limits and get maximum allowed position size
@@ -1653,7 +1709,8 @@ async def _verify_with_deep_research(
                     dual_engine = DualAIDecisionEngine(
                         xai_client=xai_client,
                         openai_client=openai_client,
-                        db_manager=db_manager
+                        db_manager=db_manager,
+                        kalshi_client=kalshi_client
                     )
 
                     logging.getLogger("deep_research").info(f"🕵️ Using Dual AI Engine (Grok+GPT) for deep research on {opportunity.market_id}")

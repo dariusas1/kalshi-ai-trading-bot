@@ -146,13 +146,14 @@ async def run_ingestion(
             
             cursor = None
             while True:
-                response = await kalshi_client.get_markets(limit=100, cursor=cursor)
+                response = await kalshi_client.get_markets(limit=100, cursor=cursor, status="open")
                 markets_page = response.get("markets", [])
 
-                active_markets = [m for m in markets_page if m["status"] == "active"]
+                active_markets = markets_page # API filters for open markets
+                
                 if active_markets:
                     logger.info(
-                        f"Fetched {len(markets_page)} markets, {len(active_markets)} are active."
+                        f"Fetched {len(markets_page)} markets, {len(active_markets)} are open/active."
                     )
                     await process_and_queue_markets(
                         active_markets,
