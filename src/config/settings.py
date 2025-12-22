@@ -30,26 +30,33 @@ class APIConfig:
 @dataclass
 class TradingConfig:
     """Trading strategy configuration."""
-    # Position sizing and risk management - MADE MORE AGGRESSIVE  
-    max_position_size_pct: float = 3.0  # Max 3% of portfolio per position
+    # Position sizing and risk management - SNIPER MODE (Concentrated High Conviction)
+    max_position_size_pct: float = 5.0  # INCREASED: Max 5% for high conviction
     max_daily_loss_pct: float = 8.0    # Max 8% daily loss limit
-    max_positions: int = 6              # Max 6 concurrent positions
+    max_positions: int = 4              # REDUCED: Max 4 concurrent positions (Concentrated)
     min_balance: float = 25.0           # REDUCED: Lower minimum to trade more (was 100)
     live_trading_enabled: bool = field(default_factory=lambda: _env_flag("LIVE_TRADING_ENABLED", "false"))
     
-    # Market filtering criteria - MUCH MORE PERMISSIVE
+    # Market filtering criteria - STRICT TIME LIMITS
     min_volume: float = 750.0            # Minimum volume to consider market
-    max_time_to_expiry_days: int = 14    # INCREASED: Allow longer timeframes (was 14, now 30)
+    max_time_to_expiry_days: int = 1     # STRICT: Only trade markets expiring within 24 hours
+    max_market_expiry_hours: int = 24    # NEW: Maximum market expiry in hours for clarity
     
-    # AI decision making - MORE AGGRESSIVE THRESHOLDS
-    min_confidence_to_trade: float = 0.55   # REDUCED: 55% minimum AI confidence to trade (was 65%)
-    scan_interval_seconds: int = 90      # Scan markets every 90 seconds
+    # AI decision making - SNIPER MODE (High Conviction)
+    min_confidence_to_trade: float = 0.65   # INCREASED: 65% minimum AI confidence to trade (Sniper Mode)
+    scan_interval_seconds: int = 300      # INCREASED: Scan markets every 5 minutes (300s) to avoid rate limits
     
     # AI model configuration
-    primary_model: str = "grok-4" # DO NOT CHANGE THIS UNDER ANY CIRCUMSTANCES
+    primary_model: str = "grok-4-1-fast-reasoning" # xAI fast reasoning model
     fallback_model: str = "grok-3"  # Fallback to available model
     ai_temperature: float = 0  # Lower temperature for more consistent JSON output
     ai_max_tokens: int = 8000    # Reasonable limit for reasoning models (grok-4 works better with 8000)
+    
+    # Enhanced AI Client settings
+    ai_timeout: float = 45.0
+    ai_max_retries: int = 3
+    xai_models: List[str] = field(default_factory=lambda: ["grok-4.1", "grok-3"])
+    openai_models: List[str] = field(default_factory=lambda: ["gpt-5.2", "gpt-5"])
     
     # Position sizing (LEGACY - now using Kelly-primary approach)
     default_position_size: float = 3.0  # REDUCED: Now using Kelly Criterion as primary method (was 5%, now 3%)
@@ -63,11 +70,11 @@ class TradingConfig:
     expected_slippage: float = 0.005       # Slippage haircut on edge/returns
     high_volatility_kelly_cap: float = 0.5  # Cap Kelly fraction in high-volatility regimes
 
-    # Trading frequency - MORE FREQUENT
-    market_scan_interval: int = 90      # 90 second scan interval
-    position_check_interval: int = 30       # Check positions every 30 seconds
+    # Trading frequency - SNIPER MODE (Slower, More Deliberate)
+    market_scan_interval: int = 300      # 300 second scan interval
+    position_check_interval: int = 60       # Check positions every 60 seconds
     max_trades_per_hour: int = 4           # Max 4 trades per hour
-    run_interval_minutes: int = 15          # DECREASED: Run more frequently (was 15, now 10)
+    run_interval_minutes: int = 30          # INCREASED: Run less frequently (30m) to save costs/rates
     num_processor_workers: int = 5      # Number of concurrent market processor workers
     
     # Strategy allocations (should sum to 1.0)
@@ -92,25 +99,25 @@ class TradingConfig:
     trailing_stop_distance_pct: float = 0.05  # 5% trailing distance
     trailing_stop_activation_pct: float = 0.03 # Activate trailing stop after 3% profit
 
-    # AI trading criteria - MORE PERMISSIVE
-    max_analysis_cost_per_decision: float = 0.15  # INCREASED: Allow higher cost per decision (was 0.10, now 0.15)
-    min_confidence_threshold: float = 0.60  # DECREASED: Lower confidence threshold (was 0.55, now 0.45)
+    # AI trading criteria - SNIPER MODE
+    max_analysis_cost_per_decision: float = 0.05  # REDUCED: $0.05 max per-decision cost (Efficient usage)
+    min_confidence_threshold: float = 0.65  # INCREASED: Higher confidence threshold (sync with min_confidence_to_trade)
 
-    # Cost control and market analysis frequency - CONSERVATIVE SETTINGS
-    daily_ai_budget: float = 12.0  # DEFAULT: $12.00 daily AI budget
-    max_ai_cost_per_decision: float = 0.08  # DEFAULT: $0.08 max per-decision cost
-    analysis_cooldown_hours: int = 2  # DEFAULT: 2 hour cooldown
-    max_analyses_per_market_per_day: int = 3  # INCREASED: More analyses per day (was 2, now 4)
+    # Cost control and market analysis frequency - SNIPER MODE
+    daily_ai_budget: float = 3.50  # REDUCED: $3.50 daily AI budget (Target <$5)
+    max_ai_cost_per_decision: float = 0.05  # REDUCED: Sync with above
+    analysis_cooldown_hours: int = 12  # INCREASED: 12 hour cooldown (Analyze once per day)
+    max_analyses_per_market_per_day: int = 1  # REDUCED: Max 1 analysis per market per day (One Shot)
     
     # Daily AI spending limits - SAFETY CONTROLS
-    daily_ai_cost_limit: float = 20.0  # Maximum daily spending on AI API calls (USD)
+    daily_ai_cost_limit: float = 4.50  # REDUCED: Hard cap at $4.50/day
     enable_daily_cost_limiting: bool = True  # Enable daily cost limits
     sleep_when_limit_reached: bool = True  # Sleep until next day when limit reached
 
-    # Enhanced market filtering to reduce analyses - MORE PERMISSIVE
-    min_volume_for_ai_analysis: float = 1000.0  # DECREASED: Much lower threshold (was 500, now 200)
+    # Enhanced market filtering to reduce analyses - SNIPER MODE
+    min_volume_for_analysis: float = 1000.0  # INCREASED: Only analyze liquid markets ($1000+)
     skip_news_for_low_volume: bool = True
-    news_search_volume_threshold: float = 1000.0
+    news_search_volume_threshold: float = 2500.0 # INCREASED: Only search news for very active markets
     exclude_low_liquidity_categories: List[str] = field(default_factory=lambda: [
         # REMOVED weather and entertainment - trade all categories
     ])
@@ -155,8 +162,8 @@ class TradingConfig:
     max_concurrent_markets: int = 10
 
     # === MARKET SELECTION (ADVANCED) ===
-    min_volume_for_analysis: float = 200.0
-    min_volume_for_market_making: float = 500.0
+    min_volume_for_analysis: float = 1000.0 # Sync with above
+    min_volume_for_market_making: float = 2000.0 # INCREASED: Safer market making
     min_price_movement: float = 0.0     # DISABLED: Allow 50/50 markets (was 0.02)
     min_confidence_long_term: float = 0.45
 
@@ -171,8 +178,8 @@ class TradingConfig:
     max_correlation: float = 0.95
     max_drawdown: float = 0.50
     max_sector_exposure: float = 0.90
-    min_trade_edge: float = 0.05
-    min_confidence_for_large_size: float = 0.65
+    min_trade_edge: float = 0.08 # INCREASED: Require 8% edge
+    min_confidence_for_large_size: float = 0.65 # INCREASED: Sync with min_confidence
     max_reduction_per_cycle: float = 0.30
     min_position_value: float = 5.0
     rebalance_threshold: float = 0.10
@@ -186,7 +193,7 @@ class TradingConfig:
     profit_threshold: float = 0.15
     loss_threshold: float = 0.08
     confidence_decay_threshold: float = 0.25
-    max_hold_time_hours: int = 72
+    max_hold_time_hours: int = 24         # STRICT: Max 24 hours hold time
     volatility_adjustment: bool = True
 
     # === POSITION LIMITS ===
@@ -258,6 +265,26 @@ class TradingConfig:
     ensemble_enable_uncertainty_quantification: bool = True # Quantify decision uncertainty
     ensemble_enable_contribution_analysis: bool = True   # Track individual model contributions
 
+    # === CIRCUIT BREAKER SETTINGS (Production Safety) ===
+    circuit_breaker_enabled: bool = True  # Master switch for circuit breaker
+    circuit_breaker_hourly_loss_pct: float = 0.05  # 5% hourly loss triggers global pause
+    circuit_breaker_require_manual_reset: bool = True  # Require operator to reset after trip
+    circuit_breaker_cooldown_minutes: int = 60  # Hourly window duration
+
+    # === EXPIRATION RISK MANAGEMENT (Production Safety) ===
+    auto_exit_expiring_enabled: bool = True  # Auto-close positions near expiry
+    auto_exit_minutes_before_expiry: int = 30  # Close positions 30 minutes before market close
+
+    # === DUAL-AI CONFIGURATION (Grok Forecaster + GPT Critic) ===
+    # Two-stage AI decision system: Grok researches/predicts, GPT validates before trading
+    enable_dual_ai_mode: bool = True                    # Enable Grok forecaster + GPT critic system
+    dual_ai_min_trade_value: float = 5.0                # Minimum trade value to use dual-AI ($5)
+    dual_ai_critic_must_approve: bool = True            # Critic must approve for trade to execute
+    dual_ai_max_cost_per_decision: float = 0.12         # Max combined cost for dual-AI analysis
+    dual_ai_min_agreement_score: float = 0.6            # Minimum critic agreement score to approve
+    dual_ai_skip_critic_for_skip: bool = True           # Skip GPT critic if Grok says SKIP (saves cost)
+    dual_ai_use_for_high_stakes_only: bool = False      # Only use dual-AI for high-value trades
+
 
 @dataclass
 class LoggingConfig:
@@ -308,7 +335,7 @@ use_dynamic_exits: bool = True
 profit_threshold: float = 0.15          # DECREASED: Take profits sooner (was 0.25, now 0.20)
 loss_threshold: float = 0.08            # INCREASED: Allow larger losses (was 0.10, now 0.15)
 confidence_decay_threshold: float = 0.25  # INCREASED: Allow more confidence decay (was 0.20, now 0.25)
-max_hold_time_hours: int = 72          # INCREASED: Hold longer (was 168, now 240 hours = 10 days)
+max_hold_time_hours: int = 24          # STRICT: Max 24 hours hold time to limit exposure
 volatility_adjustment: bool = True      # Adjust exits based on volatility
 
 # === MARKET MAKING STRATEGY ===
@@ -328,14 +355,14 @@ min_price_movement: float = 0.0        # DISABLED: Allow 50/50 markets (was 2%)
 max_bid_ask_spread: float = 0.15        # INCREASED: Allow wider spreads (was 0.10, now 15¢)
 min_confidence_long_term: float = 0.45  # DECREASED: Lower confidence for distant expiries (was 0.65, now 45%)
 
-# === COST OPTIMIZATION (MORE GENEROUS) ===
+# === COST OPTIMIZATION (SNIPER MODE) ===
 # Enhanced cost controls for the beast mode system
-daily_ai_budget: float = 25.0           # INCREASED: Much higher budget for more opportunities (was 15.0, now 25.0)
-max_ai_cost_per_decision: float = 0.15  # INCREASED: Higher per-decision limit (was 0.12, now 0.15)
-analysis_cooldown_hours: int = 1        # DECREASED: Much shorter cooldown (was 2, now 1)
-max_analyses_per_market_per_day: int = 10 # INCREASED: More analyses per day (was 6, now 10)
+daily_ai_budget: float = 3.50           # REDUCED: Sniper mode budget
+max_ai_cost_per_decision: float = 0.05  # REDUCED: Efficient usage
+analysis_cooldown_hours: int = 12        # INCREASED: Analyze once per day
+max_analyses_per_market_per_day: int = 1 # REDUCED: One shot per day
 skip_news_for_low_volume: bool = True   # Skip expensive searches for low volume
-news_search_volume_threshold: float = 1000.0  # News threshold
+news_search_volume_threshold: float = 2500.0  # News threshold
 
 # === SYSTEM BEHAVIOR ===
 # Overall system behavior settings

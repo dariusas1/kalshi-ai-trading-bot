@@ -19,10 +19,12 @@ Key improvements:
 import asyncio
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Union
 
 from src.clients.kalshi_client import KalshiClient
 from src.clients.xai_client import XAIClient
+from src.intelligence.enhanced_client import EnhancedAIClient
+from src.intelligence.ensemble_coordinator import EnsembleCoordinator
 from src.utils.database import DatabaseManager
 from src.config.settings import settings
 from src.utils.logging_setup import get_trading_logger
@@ -40,9 +42,10 @@ from src.jobs.execute import execute_position
 
 
 async def run_trading_job(
-    xai_client: Optional[XAIClient] = None,
+    xai_client: Union[XAIClient, EnhancedAIClient] = None,
     db_manager: Optional[DatabaseManager] = None,
-    kalshi_client: Optional[KalshiClient] = None
+    kalshi_client: Optional[KalshiClient] = None,
+    ensemble_coordinator: Optional[EnsembleCoordinator] = None
 ) -> Optional[TradingSystemResults]:
     """
     Enhanced trading job using the Unified Advanced Trading System.
@@ -108,7 +111,7 @@ async def run_trading_job(
         # Execute the unified trading system
         logger.info("🎯 Executing Unified Advanced Trading System")
         results = await run_unified_trading_system(
-            db_manager, kalshi_client, xai_client, config
+            db_manager, kalshi_client, xai_client, config, ensemble_coordinator
         )
         
         # Log comprehensive results

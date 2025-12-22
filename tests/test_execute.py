@@ -4,9 +4,11 @@ import pytest
 from unittest.mock import patch, AsyncMock
 from datetime import datetime
 
-from src.jobs.execute import execute_position
+from src.jobs.execute import execute_position, place_sell_limit_order, place_profit_taking_orders
 from src.utils.database import DatabaseManager, Position
+from src.clients.kalshi_client import KalshiClient
 from tests.test_database import TEST_DB
+from tests.test_helpers import find_suitable_test_market
 
 # Mark all tests in this file as async
 pytestmark = pytest.mark.asyncio
@@ -39,7 +41,8 @@ async def test_execute_position_places_live_order():
     # Create a mock KalshiClient
     from unittest.mock import Mock
     mock_kalshi_client = Mock()
-    mock_kalshi_client.place_order = AsyncMock(return_value={"order": {"order_id": "test-order-123"}})
+    mock_kalshi_client.place_order = AsyncMock(return_value={"order": {"order_id": "test-order-123", "status": "executed"}})
+    mock_kalshi_client.get_market = AsyncMock(return_value={"market": {"yes_bid": 50, "yes_ask": 52, "no_bid": 48, "no_ask": 50}})
     mock_kalshi_client.close = AsyncMock()
 
     try:
@@ -79,12 +82,7 @@ async def test_sell_limit_order_functionality():
     Test the sell limit order functionality with real Kalshi API.
     This test checks that we can place sell limit orders for existing positions.
     """
-    from src.jobs.execute import place_sell_limit_order
-    from src.utils.database import DatabaseManager, Position
-    from src.clients.kalshi_client import KalshiClient
-    from tests.test_helpers import find_suitable_test_market
-    from datetime import datetime
-    import os
+    # All imports already available at top
     
     # Setup test database
     test_db = "test_sell_limit.db"
@@ -142,10 +140,7 @@ async def test_profit_taking_orders():
     """
     Test profit-taking sell limit orders with real positions.
     """
-    from src.jobs.execute import place_profit_taking_orders
-    from src.utils.database import DatabaseManager
-    from src.clients.kalshi_client import KalshiClient
-    import os
+    # All imports already available at top
     
     # Setup test database
     test_db = "test_profit_taking.db"

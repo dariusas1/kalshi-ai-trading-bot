@@ -5,8 +5,7 @@ Advanced model selection system that considers performance, cost, market conditi
 and health status to optimize AI model selection for trading decisions.
 """
 
-import asyncio
-from typing import Dict, Any, List, Optional, Tuple, Set
+from typing import Dict, Any, List, Optional, Set
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import statistics
@@ -15,11 +14,9 @@ from enum import Enum
 from src.utils.performance_tracker import (
     PerformanceTracker,
     ModelPerformanceMetrics,
-    ModelStrengths,
-    CostPerformanceMetrics,
-    RollingWindowMetrics
+    CostPerformanceMetrics
 )
-from src.utils.database import DatabaseManager, ModelHealth
+from src.utils.database import ModelHealth
 from src.utils.logging_setup import TradingLoggerMixin
 
 

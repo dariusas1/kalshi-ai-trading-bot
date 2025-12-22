@@ -206,39 +206,75 @@ class TradingPerformanceAnalyzer:
         """Use Grok4 to analyze performance data and generate insights."""
         
         analysis_prompt = f"""
-You are an expert quantitative trading analyst reviewing a Kalshi prediction market trading system. 
+You are an expert quantitative trading analyst reviewing a Kalshi prediction market trading system.
 
-Analyze this performance data and provide actionable insights:
+---
+## CURRENT PORTFOLIO STATE
 
-CURRENT PORTFOLIO:
-- Active Positions: {performance_data.get('portfolio', {}).get('active_positions', 0)}
-- Total Contracts: {performance_data.get('portfolio', {}).get('total_contracts', 0)}
-- Available Cash: ${performance_data.get('portfolio', {}).get('available_cash', 0):.2f}
+- **Active Positions:** {performance_data.get('portfolio', {}).get('active_positions', 0)}
+- **Total Contracts:** {performance_data.get('portfolio', {}).get('total_contracts', 0)}
+- **Available Cash:** ${performance_data.get('portfolio', {}).get('available_cash', 0):.2f}
 
-HISTORICAL PERFORMANCE:
+---
+## HISTORICAL PERFORMANCE DATA
+
 {json.dumps(performance_data.get('performance', {}), indent=2)}
 
-MARKET SELECTION PATTERNS:
+---
+## MARKET SELECTION PATTERNS
+
 {json.dumps(performance_data.get('market_patterns', []), indent=2)}
 
-SYSTEM CONFIGURATION:
+---
+## SYSTEM CONFIGURATION
+
 {json.dumps(performance_data.get('system_config', {}), indent=2)}
 
-Please provide a comprehensive analysis covering:
+---
+## ANALYSIS FRAMEWORK
 
-1. **Performance Diagnosis**: What are the main issues causing poor performance?
-2. **Capital Management**: Is the capital allocation strategy optimal?
-3. **Market Selection**: Are we trading the right types of markets?
-4. **Risk Management**: Are our position sizing and risk controls appropriate?
-5. **Edge Detection**: Is our AI confidence calibration accurate?
-6. **Operational Issues**: Any systematic problems in execution or strategy?
+Provide a structured analysis covering:
 
-For each issue identified, provide:
-- Root cause analysis
-- Specific quantitative recommendations
-- Implementation priority (High/Medium/Low)
+### 1. CONFIDENCE CALIBRATION ANALYSIS
+- Are predicted confidence levels matching actual win rates?
+- If confidence was 70%, did trades win ~70% of the time?
+- Is the system overconfident or underconfident?
+- **Specific recommendation:** How should confidence thresholds be adjusted?
 
-Focus on actionable insights that can immediately improve performance.
+### 2. EDGE DETECTION ACCURACY
+- Are markets where edge was detected actually providing returns?
+- Is "edge" being identified where none exists?
+- Are there patterns in which types of edges are real vs illusory?
+
+### 3. COGNITIVE BIAS PATTERN DETECTION
+Analyze past trades for evidence of:
+- **Confirmation bias:** Did we cherry-pick evidence supporting our view?
+- **Recency bias:** Did we overweight recent events vs base rates?
+- **Overconfidence:** Did we trade when edge was unclear?
+- **Pattern:** Which biases are most prevalent?
+
+### 4. CAPITAL MANAGEMENT
+- Is capital allocation strategy optimal?
+- Are position sizes appropriate given actual edge?
+- Cash reserve recommendations?
+
+### 5. MARKET SELECTION
+- Which market types are most/least profitable?
+- Should certain categories be avoided entirely?
+- Are there markets that look profitable but are liquidity traps?
+
+### 6. ACTIONABLE RECOMMENDATIONS
+For each recommendation, provide:
+- **Priority:** [CRITICAL / HIGH / MEDIUM / LOW]
+- **Action:** Specific change to implement
+- **Expected Impact:** Quantified if possible
+- **Implementation:** How to implement in the system
+
+---
+## OUTPUT FORMAT
+
+Provide analysis in clear sections with bullet points.
+End with a numbered list of TOP 5 PRIORITY ACTIONS.
 """
 
         try:

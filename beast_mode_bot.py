@@ -26,7 +26,7 @@ import argparse
 import time
 import signal
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from src.jobs.trade import run_trading_job
@@ -38,11 +38,17 @@ from src.utils.logging_setup import setup_logging, get_trading_logger
 from src.utils.database import DatabaseManager
 from src.clients.kalshi_client import KalshiClient
 from src.clients.xai_client import XAIClient
+from src.intelligence.enhanced_client import EnhancedAIClient
+from src.intelligence.ensemble_coordinator import EnsembleCoordinator
 from src.config.settings import settings
 
 # Import Beast Mode components
 from src.strategies.unified_trading_system import run_unified_trading_system, TradingSystemConfig
 # NOTE: BeastModeDashboard is imported lazily in run_dashboard_mode() to avoid import errors on Railway
+
+# Import Production Safety components
+from src.utils.circuit_breaker import CircuitBreaker
+from src.jobs.execute import auto_exit_expiring_positions
 
 
 class BeastModeBot:
@@ -66,6 +72,7 @@ class BeastModeBot:
         self.dashboard_mode = dashboard_mode
         self.logger = get_trading_logger("beast_mode_bot")
         self.shutdown_event = asyncio.Event()
+        self.circuit_breaker: Optional[CircuitBreaker] = None  # Initialized in run_trading_mode
         
         # Set live trading in settings
         settings.trading.live_trading_enabled = live_mode
@@ -103,10 +110,31 @@ class BeastModeBot:
             db_manager = DatabaseManager()
             await self._ensure_database_ready(db_manager)
             self.logger.info("✅ Database initialization complete!")
+
+            self.ensemble_coordinator = None  # Placeholder
             
             # Initialize other components
             kalshi_client = KalshiClient()
-            xai_client = XAIClient(db_manager=db_manager)  # Pass db_manager for LLM logging
+            # 🚀 ENHANCED INTELLEGENCE UPGRADE
+            # Replace basic XAIClient with EnhancedAIClient that has fallback/redundancy
+            xai_client = EnhancedAIClient(db_manager=db_manager, kalshi_client=kalshi_client)
+            
+            # Initialize Ensemble Coordinator
+            ensemble_coordinator = EnsembleCoordinator(db_manager=db_manager)
+            await ensemble_coordinator.initialize()
+            self.ensemble_coordinator = ensemble_coordinator
+            self.logger.info("✅ Ensemble Coordinator initialized")
+            
+            # === PRODUCTION SAFETY: Initialize Circuit Breaker ===
+            self.circuit_breaker = CircuitBreaker(db_manager)
+            cb_status = await self.circuit_breaker.get_status()
+            if cb_status.get('is_paused'):
+                self.logger.critical(f"🚨 CIRCUIT BREAKER IS ACTIVE: {cb_status.get('pause_reason')}")
+                self.logger.critical("⛔ Trading will not start until circuit breaker is reset.")
+                self.logger.critical("To reset, manually call: await db_manager.reset_circuit_breaker()")
+                return
+            else:
+                self.logger.info(f"🔒 Circuit breaker initialized (threshold: {cb_status.get('threshold_pct', 0.05):.0%} hourly loss)")
             
             # 🔄 Sync with Kalshi on startup to ensure accurate position data
             self.logger.info("🔄 Syncing positions with Kalshi...")
@@ -200,7 +228,7 @@ class BeastModeBot:
                 self.logger.error(f"Error in market ingestion: {e}")
                 await asyncio.sleep(60)
 
-    async def _run_trading_cycles(self, db_manager: DatabaseManager, kalshi_client: KalshiClient, xai_client: XAIClient):
+    async def _run_trading_cycles(self, db_manager: DatabaseManager, kalshi_client: KalshiClient, xai_client: EnhancedAIClient):
         """Main Beast Mode trading cycles."""
         cycle_count = 0
         
@@ -213,6 +241,16 @@ class BeastModeBot:
                     continue
                 
                 cycle_count += 1
+                
+                # === PRODUCTION SAFETY: Circuit Breaker Check ===
+                if self.circuit_breaker:
+                    can_trade, reason = await self.circuit_breaker.check_can_trade()
+                    if not can_trade:
+                        self.logger.critical(f"🚨 CIRCUIT BREAKER ACTIVE: {reason}")
+                        self.logger.critical("⛔ Trading halted. Manual reset required.")
+                        self.logger.critical("To reset: Run `python -c \"import asyncio; from src.utils.database import DatabaseManager; db = DatabaseManager(); asyncio.run(db.initialize()); asyncio.run(db.reset_circuit_breaker())\"`")
+                        await asyncio.sleep(60)  # Check again in 1 minute
+                        continue
                 
                 # Check Kill Switch
                 kill_switch = await db_manager.get_setting("kill_switch", "off")
@@ -259,7 +297,8 @@ class BeastModeBot:
                 try:
                     if settings.trading.max_trades_per_hour:
                         recent_trades = await db_manager.get_recent_trades(limit=200)
-                        one_hour_ago = datetime.now() - timedelta(hours=1)
+                        one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+                        one_hour_ago_naive = datetime.now() - timedelta(hours=1)  # Fallback for naive datetimes
                         trades_last_hour = 0
                         for trade in recent_trades:
                             ts = trade.get("exit_timestamp") or trade.get("timestamp")
@@ -270,8 +309,19 @@ class BeastModeBot:
                                     continue
                             else:
                                 ts_dt = ts
-                            if ts_dt and ts_dt >= one_hour_ago:
-                                trades_last_hour += 1
+                            if ts_dt:
+                                # Handle both timezone-aware and naive datetime comparisons
+                                try:
+                                    if ts_dt.tzinfo is not None:
+                                        if ts_dt >= one_hour_ago:
+                                            trades_last_hour += 1
+                                    else:
+                                        if ts_dt >= one_hour_ago_naive:
+                                            trades_last_hour += 1
+                                except TypeError:
+                                    # Fallback: compare as naive
+                                    if ts_dt.replace(tzinfo=None) >= one_hour_ago_naive:
+                                        trades_last_hour += 1
 
                         if trades_last_hour >= settings.trading.max_trades_per_hour:
                             self.logger.warning(
@@ -290,7 +340,8 @@ class BeastModeBot:
                 results = await run_trading_job(
                     xai_client=xai_client,
                     db_manager=db_manager,
-                    kalshi_client=kalshi_client
+                    kalshi_client=kalshi_client,
+                    ensemble_coordinator=self.ensemble_coordinator if hasattr(self, 'ensemble_coordinator') else None
                 )
                 
                 if results and results.total_positions > 0:
@@ -421,6 +472,23 @@ class BeastModeBot:
                 
                 # ✅ FIXED: Pass the shared database manager
                 await run_tracking(db_manager)
+                
+                # === PRODUCTION SAFETY: Expiration Risk Auto-Exit ===
+                # Close positions that are within 48 hours of market expiration
+                expiry_results = await auto_exit_expiring_positions(
+                    db_manager=db_manager,
+                    kalshi_client=kalshi_client,
+                    minutes_before_expiry=settings.trading.auto_exit_minutes_before_expiry
+                )
+                if expiry_results.get('positions_closed', 0) > 0:
+                    self.logger.warning(
+                        f"⏰ Expiration auto-exit: Closed {expiry_results['positions_closed']} positions, "
+                        f"P&L: ${expiry_results.get('total_pnl', 0):.2f}"
+                    )
+                
+                # Clean up old idempotency keys (TTL: 24 hours)
+                await db_manager.cleanup_old_idempotency_keys(hours=24)
+                
                 await asyncio.sleep(max(10, settings.trading.position_check_interval))
             except Exception as e:
                 self.logger.error(f"Error in position tracking: {e}")

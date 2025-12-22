@@ -22,13 +22,14 @@ Key innovations:
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass, asdict
-import numpy as np
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Union
+from dataclasses import dataclass
 
 from src.clients.kalshi_client import KalshiClient
 from src.clients.xai_client import XAIClient
+from src.intelligence.enhanced_client import EnhancedAIClient
+from src.intelligence.ensemble_coordinator import EnsembleCoordinator
 from src.utils.database import DatabaseManager, Market, Position
 from src.config.settings import settings
 from src.utils.logging_setup import get_trading_logger
@@ -106,6 +107,11 @@ class TradingSystemResults:
     theta_exposure: float = 0.0
     theta_expected_profit: float = 0.0
     
+    # Arbitrage metrics
+    arbitrage_trades: int = 0
+    arbitrage_exposure: float = 0.0
+    arbitrage_expected_profit: float = 0.0
+    
     # Performance
     total_positions: int = 0
     capital_efficiency: float = 0.0  # % of capital used
@@ -137,12 +143,14 @@ class UnifiedAdvancedTradingSystem:
         self,
         db_manager: DatabaseManager,
         kalshi_client: KalshiClient,
-        xai_client: XAIClient,
-        config: Optional[TradingSystemConfig] = None
+        xai_client: Union[XAIClient, EnhancedAIClient],
+        config: Optional[TradingSystemConfig] = None,
+        ensemble_coordinator: Optional[EnsembleCoordinator] = None
     ):
         self.db_manager = db_manager
         self.kalshi_client = kalshi_client
         self.xai_client = xai_client
+        self.ensemble_coordinator = ensemble_coordinator
         self.config = config or TradingSystemConfig()
         self.logger = get_trading_logger("unified_trading_system")
         
@@ -151,8 +159,12 @@ class UnifiedAdvancedTradingSystem:
         
         # OLD HARDCODED WAY (REMOVED):
         # self.total_capital = getattr(settings.trading, 'total_capital', 10000)
-        self.last_rebalance = datetime.now()
+        self.last_rebalance = datetime.now(timezone.utc)
         self.system_metrics = {}
+        
+        if self.ensemble_coordinator:
+            self.logger.info("✅ Ensemble Coordinator linked to Unified System")
+        self.logger.info(f"Unified System initialized with Client: {type(xai_client).__name__}")
         
         # Capital allocation will be set by async_initialize() after getting actual balance
 
@@ -637,11 +649,28 @@ class UnifiedAdvancedTradingSystem:
                     # FIXED: Extract from nested 'market' object
                     market_info = market_data.get('market', {})
                     
-                    # Get price for the intended side (already determined above)
+                    # Get price for the intended side using actual Kalshi API fields
+                    # Kalshi API provides: last_price, no_bid, no_ask, previous_yes_bid, previous_yes_ask
                     if intended_side == "YES":
-                        price = market_info.get('yes_price', 50) / 100
+                        # Use last_price for YES side
+                        price_cents = market_info.get('last_price')
+                        if price_cents is None:
+                            # Fallback to previous_yes_bid/ask midpoint
+                            yes_bid = market_info.get('previous_yes_bid', 50)
+                            yes_ask = market_info.get('previous_yes_ask', 50)
+                            price_cents = (yes_bid + yes_ask) / 2
+                        price = price_cents / 100
                     else:
-                        price = market_info.get('no_price', 50) / 100
+                        # Use no_bid/no_ask midpoint for NO side, or calculate from last_price
+                        no_bid = market_info.get('no_bid')
+                        no_ask = market_info.get('no_ask')
+                        if no_bid is not None and no_ask is not None:
+                            price_cents = (no_bid + no_ask) / 2
+                        else:
+                            # Fallback: NO price = 100 - YES price
+                            last_price = market_info.get('last_price', 50)
+                            price_cents = 100 - last_price
+                        price = price_cents / 100
                     
                     # Calculate quantity
                     if price <= 0:
@@ -676,7 +705,7 @@ class UnifiedAdvancedTradingSystem:
                         side=intended_side,
                         entry_price=price,
                         quantity=quantity,
-                        timestamp=datetime.now(),
+                        timestamp=datetime.now(timezone.utc),
                         rationale=f"Portfolio optimization allocation: {allocation_fraction:.1%} of capital. Edge: {opportunity.edge:.3f}, Confidence: {opportunity.confidence:.3f}, Stop: {exit_levels['stop_loss_pct']}%",
                         confidence=opportunity.confidence,
                         live=False,  # Will be set to True after execution
@@ -877,6 +906,11 @@ class UnifiedAdvancedTradingSystem:
                 theta_exposure=theta_results.get('total_exposure', 0.0) if theta_results else 0.0,
                 theta_expected_profit=theta_results.get('expected_profit', 0.0) if theta_results else 0.0,
                 
+                # Arbitrage
+                arbitrage_trades=arbitrage_results.get('arbitrage_trades', 0),
+                arbitrage_exposure=arbitrage_results.get('arbitrage_exposure', 0.0),
+                arbitrage_expected_profit=arbitrage_results.get('arbitrage_profit', 0.0),
+                
                 # Portfolio metrics
                 total_capital_used=total_capital_used,
                 portfolio_expected_return=portfolio_expected_return,
@@ -948,7 +982,7 @@ class UnifiedAdvancedTradingSystem:
                         self.logger.info(f"   • {detail}")
             
             # Check if rebalancing is needed
-            time_since_rebalance = datetime.now() - self.last_rebalance
+            time_since_rebalance = datetime.now(timezone.utc) - self.last_rebalance
             if time_since_rebalance.total_seconds() > (self.config.rebalance_frequency_hours * 3600):
                 self.logger.info("🔄 Portfolio rebalancing triggered")
                 
@@ -965,7 +999,7 @@ class UnifiedAdvancedTradingSystem:
                 else:
                     self.logger.info(f"⚖️ No rebalancing needed: {rebalance_result['summary']}")
                 
-                self.last_rebalance = datetime.now()
+                self.last_rebalance = datetime.now(timezone.utc)
             
             # Performance monitoring
             if results.portfolio_sharpe_ratio < self.config.target_sharpe_ratio * 0.5:
@@ -1015,8 +1049,9 @@ class UnifiedAdvancedTradingSystem:
 async def run_unified_trading_system(
     db_manager: DatabaseManager,
     kalshi_client: KalshiClient,
-    xai_client: XAIClient,
-    config: Optional[TradingSystemConfig] = None
+    xai_client: Union[XAIClient, EnhancedAIClient],
+    config: Optional[TradingSystemConfig] = None,
+    ensemble_coordinator: Optional[EnsembleCoordinator] = None
 ) -> TradingSystemResults:
     """
     Main entry point for the unified advanced trading system.
@@ -1031,7 +1066,7 @@ async def run_unified_trading_system(
         
         # Initialize system
         trading_system = UnifiedAdvancedTradingSystem(
-            db_manager, kalshi_client, xai_client, config
+            db_manager, kalshi_client, xai_client, config, ensemble_coordinator
         )
         
         # 🚨 CRITICAL: Initialize with dynamic balance from Kalshi

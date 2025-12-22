@@ -5,7 +5,7 @@ Fetches actual trade history from Kalshi API and calculates real P&L metrics.
 Updates dashboard with actual trading performance instead of placeholder values.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 import aiosqlite
@@ -120,7 +120,7 @@ class PnLTracker:
         """Calculate P&L metrics from fills and trade logs."""
         metrics = PnLMetrics()
         
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         week_ago = now - timedelta(days=7)
         

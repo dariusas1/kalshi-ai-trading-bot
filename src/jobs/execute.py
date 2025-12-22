@@ -4,14 +4,16 @@ Trade Execution Job
 This job takes a position and executes it as a trade.
 """
 import asyncio
+import json
 import uuid
-from datetime import datetime
-from typing import Optional, Dict, Tuple
+from datetime import datetime, timedelta
+from typing import Optional, Dict, Tuple, List
 
 from src.utils.database import DatabaseManager, Position
 from src.config.settings import settings
 from src.utils.logging_setup import get_trading_logger
 from src.clients.kalshi_client import KalshiClient, KalshiAPIError
+from src.utils.pricing_utils import PriceSelector, PriceConverter, create_order_price
 
 async def execute_position(
     position: Position, 
@@ -46,9 +48,17 @@ async def execute_position(
         live_mode = False
 
     # 🚨 CRITICAL: Validate ticker before execution
+    # Block MULTIGAME combo markets (complex settlement) but allow SINGLEGAME markets
     if position.market_id.startswith("KXMV"):
-        logger.error(f"❌ BLOCKED: Cannot execute on KXMV combo market: {position.market_id}")
-        return False
+        # Allow single-game markets (e.g., KXMVENFLSINGLEGAME, KXMVNBASINGLEGAME)
+        if "SINGLEGAME" in position.market_id:
+            logger.info(f"✅ ALLOWED: Single game market: {position.market_id}")
+        elif "MULTIGAME" in position.market_id:
+            logger.warning(f"⏭️ SKIPPED: Multi-game combo market: {position.market_id}")
+            return False
+        else:
+            # Unknown KXMV pattern - allow with warning
+            logger.warning(f"⚠️ Unknown KXMV pattern, proceeding: {position.market_id}")
     
     if not position.market_id or len(position.market_id) < 5:
         logger.error(f"❌ BLOCKED: Invalid market_id: {position.market_id}")
@@ -58,17 +68,36 @@ async def execute_position(
         try:
             client_order_id = str(uuid.uuid4())
             
-            # 🎯 SMART ORDER TYPE SELECTION
-            # IOC for high edge (>10%) - urgent entry needed
-            # Market orders for standard entries
-            use_ioc = edge > 0.10 and settings.trading.algorithmic_execution
-            time_in_force = "immediate_or_cancel" if use_ioc else None  # API requires full name, not 'ioc'
-            order_type = "market"
+            # === PRODUCTION SAFETY: IDEMPOTENCY KEY TRACKING ===
+            # Store key BEFORE API call to prevent duplicates on retry
+            key_stored = await db_manager.store_idempotency_key(
+                idempotency_key=client_order_id,
+                market_id=position.market_id,
+                side=position.side.lower(),
+                action="buy",
+                status="pending"
+            )
+            if not key_stored:
+                # Key already exists - this is a duplicate request
+                logger.warning(f"🚫 Duplicate order blocked for {position.market_id}")
+                # Check if original order succeeded
+                existing = await db_manager.check_idempotency_key(client_order_id)
+                if existing and existing.get("status") == "filled":
+                    logger.info(f"✅ Original order already filled for {position.market_id}")
+                    return True
+                return False
             
-            if use_ioc:
-                logger.info(f"📈 HIGH EDGE ({edge:.1%}) - Using IOC order for {position.market_id}")
+            # 🎯 SMART ORDER TYPE SELECTION
+            # For HIGH EDGE (>10%): Use limit orders at ask price for guaranteed price
+            # For STANDARD trades: Use true market orders (no price) for immediate execution
+            use_limit_for_high_edge = edge > 0.10 and settings.trading.algorithmic_execution
+            
+            if use_limit_for_high_edge:
+                logger.info(f"📈 HIGH EDGE ({edge:.1%}) - Using limit order at ask for {position.market_id}")
+                order_type = "limit"
             else:
-                logger.info(f"📊 Standard edge ({edge:.1%}) - Using market order for {position.market_id}")
+                logger.info(f"📊 Standard edge ({edge:.1%}) - Using MARKET order for {position.market_id}")
+                order_type = "market"
             
             order_args = {
                 "ticker": position.market_id,
@@ -79,40 +108,59 @@ async def execute_position(
                 "type_": order_type
             }
             
-            # 🚨 FIX: Kalshi API requires exactly ONE price field, even for market orders
-            # Use current ask + buffer as price cap when available.
-            buffer_cents = getattr(settings.trading, "market_order_price_buffer_cents", 2)
-            market_data = await kalshi_client.get_market(position.market_id)
-            market_info = market_data.get("market", {}) if market_data else {}
-            if position.side.lower() == "yes":
-                ask = market_info.get("yes_ask", 0) or market_info.get("yes_price", 99)
-                order_args["yes_price"] = min(99, int(ask + buffer_cents))
-            else:
-                ask = market_info.get("no_ask", 0) or market_info.get("no_price", 99)
-                order_args["no_price"] = min(99, int(ask + buffer_cents))
+            # Only add price for LIMIT orders - market orders fill at best available
+            if order_type == "limit":
+                buffer_cents = getattr(settings.trading, "market_order_price_buffer_cents", 2)
+                market_data = await kalshi_client.get_market(position.market_id)
+                market_info = market_data.get("market", {}) if market_data else {}
+
+                # Create order price with proper bid/ask logic and safety buffer
+                order_price = create_order_price(market_info, position, buffer_cents, max_price=99)
+
+                if position.side.lower() == "yes":
+                    order_args["yes_price"] = order_price
+                else:
+                    order_args["no_price"] = order_price
+                
+                logger.info(f"📝 Limit order price: {order_price}¢ for {position.side.upper()}")
             
-            if time_in_force:
-                order_args["time_in_force"] = time_in_force
+            # Note: For market orders, we don't specify price - Kalshi fills at best available
 
             order_response = await kalshi_client.place_order(**order_args)
             order_info = order_response.get('order', {})
             order_id = order_info.get('order_id')
             order_status = order_info.get('status', 'unknown')
             
+            # === PRODUCTION SAFETY: UPDATE IDEMPOTENCY RESULT ===
+            await db_manager.update_idempotency_result(
+                idempotency_key=client_order_id,
+                status=order_status,
+                order_id=order_id,
+                response_json=json.dumps(order_info)
+            )
+            
             logger.info(f"Order placed for {position.market_id}. Order ID: {order_id}, Status: {order_status}")
             
-            # 🚨 FIX: Verify order actually filled before marking live
+            # 🔧 FIX: Verify order actually filled before marking live
             if order_status in ['filled', 'executed']:  # Kalshi API may return 'executed' for immediate fills
                 # Order filled immediately (market order behavior)
-                fill_price = order_info.get('yes_price', order_info.get('no_price', position.entry_price * 100)) / 100
+                # Use actual fill price from order, convert from cents to dollars
+                fill_price_cents = order_info.get('yes_price', order_info.get('no_price', 0))
+                if fill_price_cents > 0:
+                    fill_price = PriceConverter.cents_to_dollars(fill_price_cents)
+                else:
+                    # Fallback to position entry price (stored in database as dollars)
+                    fill_price = float(position.entry_price)
                 await db_manager.update_position_to_live(position.id, fill_price)
                 logger.info(f"✅ Order FILLED for {position.market_id} at ${fill_price:.2f}")
                 return True
             elif order_status in ['pending', 'resting', 'canceled']:
-                # IOC order may be canceled if not immediately filled
-                if use_ioc and order_status == 'canceled':
-                    logger.info(f"⚡ IOC order canceled (no immediate fill) - retrying with market order...")
-                    # Retry with market order as fallback
+                # Limit order may not fill immediately
+                if use_limit_for_high_edge and order_status == 'resting':
+                    logger.info(f"⚡ Limit order resting - will wait for fill or timeout...")
+                elif order_status == 'canceled':
+                    logger.info(f"⚠️ Order canceled (no fill) - retrying with true market order...")
+                    # Retry with TRUE market order (no price) as fallback
                     retry_order_id = str(uuid.uuid4())
                     retry_args = {
                         "ticker": position.market_id,
@@ -121,15 +169,11 @@ async def execute_position(
                         "action": "buy",
                         "count": position.quantity,
                         "type_": "market"
+                        # NO PRICE - true market order fills at best available
                     }
-                    # Add required price for market order
-                    if position.side.lower() == "yes":
-                        retry_args["yes_price"] = order_args.get("yes_price", 99)
-                    else:
-                        retry_args["no_price"] = order_args.get("no_price", 99)
                     retry_response = await kalshi_client.place_order(**retry_args)
                     retry_info = retry_response.get('order', {})
-                    if retry_info.get('status') == 'filled':
+                    if retry_info.get('status') in ['filled', 'executed']:
                         fill_price = retry_info.get('yes_price', retry_info.get('no_price', position.entry_price * 100)) / 100
                         await db_manager.update_position_to_live(position.id, fill_price)
                         logger.info(f"✅ FALLBACK market order FILLED for {position.market_id}")
@@ -170,7 +214,7 @@ async def execute_position(
                 except Exception as cancel_err:
                     logger.warning(f"Could not cancel order: {cancel_err}")
                 
-                # Market order fallback
+                # Market order fallback (TRUE market order - no price)
                 fallback_order_id = str(uuid.uuid4())
                 fallback_args = {
                     "ticker": position.market_id,
@@ -179,15 +223,11 @@ async def execute_position(
                     "action": "buy",
                     "count": position.quantity,
                     "type_": "market"
+                    # NO PRICE - true market order fills at best available
                 }
-                # Add required price for market order
-                if position.side.lower() == "yes":
-                    fallback_args["yes_price"] = order_args.get("yes_price", 99)
-                else:
-                    fallback_args["no_price"] = order_args.get("no_price", 99)
                 fallback_response = await kalshi_client.place_order(**fallback_args)
                 fallback_info = fallback_response.get('order', {})
-                if fallback_info.get('status') == 'filled':
+                if fallback_info.get('status') in ['filled', 'executed']:
                     fill_price = fallback_info.get('yes_price', fallback_info.get('no_price', position.entry_price * 100)) / 100
                     await db_manager.update_position_to_live(position.id, fill_price)
                     logger.info(f"✅ FALLBACK market order FILLED for {position.market_id} at ${fill_price:.2f}")
@@ -562,3 +602,152 @@ async def close_position_market(
     except Exception as e:
         logger.error(f"❌ Error in market exit: {e}")
         return False, 0.0
+
+
+# =============================================================================
+# === PRODUCTION SAFETY: EXPIRATION RISK AUTO-EXIT ===
+# =============================================================================
+
+async def auto_exit_expiring_positions(
+    db_manager: DatabaseManager,
+    kalshi_client: KalshiClient,
+    minutes_before_expiry: int = 30
+) -> Dict[str, int]:
+    """
+    Automatically close positions that are within X minutes of market expiration.
+    
+    This prevents:
+    - Force-settlement at unfavorable prices
+    - Illiquidity as market approaches close
+    - Surprise resolution outcomes
+    
+    Args:
+        db_manager: Database manager
+        kalshi_client: Kalshi API client
+        minutes_before_expiry: Minutes before expiration to trigger auto-exit (default: 30)
+    
+    Returns:
+        Dictionary with results: {'positions_closed': int, 'positions_checked': int, 'total_pnl': float}
+    """
+    logger = get_trading_logger("expiration_exit")
+    
+    results = {
+        'positions_closed': 0,
+        'positions_checked': 0,
+        'total_pnl': 0.0,
+        'positions_failed': 0
+    }
+    
+    if not settings.trading.auto_exit_expiring_enabled:
+        logger.debug("Expiration auto-exit is disabled")
+        return results
+    
+    try:
+        # Get all open live positions
+        positions = await db_manager.get_open_live_positions()
+        
+        if not positions:
+            logger.debug("No open positions to check for expiration risk")
+            return results
+        
+        now = datetime.now()
+        expiry_threshold = now + timedelta(minutes=minutes_before_expiry)
+        expiry_threshold_ts = int(expiry_threshold.timestamp())
+        
+        logger.info(f"⏰ Checking {len(positions)} positions for expiration risk (threshold: {minutes_before_expiry} min)")
+        
+        for position in positions:
+            try:
+                results['positions_checked'] += 1
+                
+                # Get market data to check expiration
+                market_response = await kalshi_client.get_market(position.market_id)
+                market_data = market_response.get('market', {})
+                
+                if not market_data:
+                    logger.warning(f"Could not get market data for {position.market_id}")
+                    continue
+                
+                # Check expiration time
+                expiration_ts = market_data.get('expiration_time') or market_data.get('close_time')
+                
+                if not expiration_ts:
+                    # Try to parse from different formats
+                    exp_str = market_data.get('expiration_time') or market_data.get('end_date')
+                    if exp_str:
+                        try:
+                            expiration_ts = int(datetime.fromisoformat(exp_str.replace('Z', '+00:00')).timestamp())
+                        except (ValueError, TypeError):
+                            continue
+                    else:
+                        continue
+                
+                # Convert if it's a string timestamp
+                if isinstance(expiration_ts, str):
+                    try:
+                        expiration_ts = int(datetime.fromisoformat(expiration_ts.replace('Z', '+00:00')).timestamp())
+                    except (ValueError, TypeError):
+                        expiration_ts = int(expiration_ts) if str(expiration_ts).isdigit() else 0
+                
+                # Check if market expires within threshold
+                if expiration_ts <= expiry_threshold_ts:
+                    minutes_remaining = (expiration_ts - int(now.timestamp())) / 60
+                    
+                    logger.warning(
+                        f"⚠️ EXPIRATION RISK: {position.market_id} expires in {minutes_remaining:.0f} min "
+                        f"(threshold: {minutes_before_expiry} min) - AUTO-EXITING"
+                    )
+                    
+                    # Calculate current price for P&L
+                    if position.side == "YES":
+                        current_price = market_data.get('yes_bid', 0)
+                        if isinstance(current_price, (int, float)):
+                            current_price = current_price / 100 if current_price > 1 else current_price
+                    else:
+                        current_price = market_data.get('no_bid', 0)
+                        if isinstance(current_price, (int, float)):
+                            current_price = current_price / 100 if current_price > 1 else current_price
+                    
+                    # Execute market exit
+                    success, exit_price = await close_position_market(
+                        position=position,
+                        db_manager=db_manager,
+                        kalshi_client=kalshi_client
+                    )
+                    
+                    if success:
+                        results['positions_closed'] += 1
+                        pnl = (exit_price - position.entry_price) * position.quantity
+                        results['total_pnl'] += pnl
+                        
+                        # Close position in database
+                        await db_manager.close_position(position.id)
+                        
+                        logger.info(
+                            f"✅ AUTO-EXITED {position.market_id} before expiration: "
+                            f"Entry=${position.entry_price:.2f}, Exit=${exit_price:.2f}, "
+                            f"P&L=${pnl:.2f}"
+                        )
+                    else:
+                        results['positions_failed'] += 1
+                        logger.error(f"❌ Failed to auto-exit {position.market_id}")
+                        
+            except Exception as e:
+                logger.error(f"Error checking expiration for {position.market_id}: {e}")
+                continue
+        
+        # Summary
+        if results['positions_closed'] > 0:
+            logger.warning(
+                f"⏰ Expiration auto-exit summary: "
+                f"Closed {results['positions_closed']}/{results['positions_checked']} positions, "
+                f"Total P&L: ${results['total_pnl']:.2f}"
+            )
+        else:
+            logger.debug(f"No positions require expiration exit ({results['positions_checked']} checked)")
+        
+        return results
+        
+    except Exception as e:
+        logger.error(f"Error in expiration auto-exit: {e}")
+        return results

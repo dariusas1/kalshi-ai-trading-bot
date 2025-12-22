@@ -6,10 +6,10 @@ to provide seamless multi-provider redundancy, graceful degradation, and emergen
 """
 
 import asyncio
-import json
 import time
+import os
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 
 from src.intelligence.fallback_manager import (
@@ -56,6 +56,60 @@ class EnhancedAIClient(TradingLoggerMixin):
     - Comprehensive health monitoring
     """
 
+    @property
+    def ml_predictor(self):
+        """Delegate to xAI client's ML predictor."""
+        return self.xai_client.ml_predictor
+
+    async def get_completion(
+        self,
+        prompt: str,
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        strategy: Optional[str] = None,
+        query_type: Optional[str] = None,
+        market_id: Optional[str] = None,
+        log_query: bool = True
+    ) -> Optional[str]:
+        """
+        Get completion with fallback support.
+
+        Note: model parameter is only used for xAI requests. OpenAI fallback uses
+        the model configured in the OpenAI client.
+        """
+        # 1. Try xAI (Primary)
+        if not self.xai_client.is_api_exhausted:
+            try:
+                if log_query:
+                    self.logger.info("Attempting completion with xAI")
+                # xAI client doesn't accept model parameter, use default
+                return await self.xai_client.get_completion(
+                    prompt=prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    strategy=strategy or "unknown",
+                    query_type=query_type or "completion",
+                    market_id=market_id
+                )
+            except Exception as e:
+                self.logger.warning(f"xAI completion failed: {e}, falling back to OpenAI")
+        
+        # 2. Fallback to OpenAI
+        try:
+            self.logger.info("Attempting completion with OpenAI (Fallback)")
+            # OpenAI client expects messages, not raw prompt for chat models
+            messages = [{"role": "user", "content": prompt}]
+            response, _ = await self.openai_client._make_completion_request(
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+            return response
+        except Exception as e:
+            self.logger.error(f"All AI providers failed for completion: {e}")
+            return None
+
     def __init__(self, db_manager=None, kalshi_client=None, config: Optional[EnhancedConfig] = None):
         """
         Initialize EnhancedAIClient.
@@ -70,7 +124,7 @@ class EnhancedAIClient(TradingLoggerMixin):
         self.config = config or EnhancedConfig()
 
         # Initialize existing clients for compatibility
-        self.xai_client = XAIClient(db_manager, kalshi_client)
+        self.xai_client = XAIClient(db_manager=db_manager, kalshi_client=kalshi_client)
         self.openai_client = OpenAIClient()
 
         # Initialize provider configurations
@@ -143,18 +197,18 @@ class EnhancedAIClient(TradingLoggerMixin):
                 max_retries=2,
                 cost_per_token=0.000025
             )
-
-        # Local provider
-        providers["local"] = ProviderConfig(
-            name="local",
-            endpoint="http://localhost:11434/v1",  # Ollama default
-            api_key="local-key",
-            models=["llama-2", "mistral", "codellama"],
-            priority=4,
-            timeout=60.0,
-            max_retries=1,
-            cost_per_token=0.000001
-        )
+        # Local provider - only add if explicitly enabled
+        if getattr(settings.trading, 'ensemble_enable_local_models', False):
+            providers["local"] = ProviderConfig(
+                name="local",
+                endpoint="http://localhost:11434/v1",  # Ollama default
+                api_key=os.getenv("OLLAMA_API_KEY", "local-key"),  # Local provider doesn't strictly need a key
+                models=["llama-2", "mistral", "codellama"],
+                priority=4,
+                timeout=60.0,
+                max_retries=1,
+                cost_per_token=0.000001
+            )
 
         return providers
 
@@ -165,7 +219,11 @@ class EnhancedAIClient(TradingLoggerMixin):
                 results = await self.provider_manager.initialize_all_providers()
                 self.logger.info("Provider initialization results", results=results)
 
-                # Start health monitoring
+                # Run an immediate health check to populate initial status
+                if self.fallback_manager:
+                    await self._check_system_health()
+
+                # Start health monitoring in background
                 if self.config.enable_fallback:
                     asyncio.create_task(self._start_health_monitoring())
 
@@ -188,7 +246,15 @@ class EnhancedAIClient(TradingLoggerMixin):
             return
 
         try:
-            health_status = await self.fallback_manager.check_provider_health("xai") if "xai" in self.providers else None
+            # Check health of ALL configured providers, not just xAI
+            for provider_name in self.providers:
+                try:
+                    await self.fallback_manager.check_provider_health(provider_name)
+                except Exception as provider_error:
+                    self.logger.warning(
+                        f"Health check failed for provider {provider_name}: {provider_error}"
+                    )
+
             system_status = await self.fallback_manager.get_system_status()
 
             self.last_health_check = datetime.now()
@@ -353,7 +419,8 @@ class EnhancedAIClient(TradingLoggerMixin):
             "no_price": no_price,
             "volume": volume,
             "days_to_expiry": days_to_expiry,
-            "news_summary": news_summary[:1000],  # Limit news length
+            "news_summary": news_summary[:1000] if news_summary else "No recent news available.",
+            "ml_context": "No technical analysis available.",  # Default value for ml_context
             "cash": portfolio_data.get("balance", 0),
             "max_trade_value": max_trade_value,
             "max_position_pct": settings.trading.max_position_size_pct,

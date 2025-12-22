@@ -3,7 +3,7 @@ Advanced Portfolio Optimization - Kelly Criterion Extensions
 
 This module implements cutting-edge portfolio optimization techniques:
 1. Kelly Criterion Extension (KCE) for prediction markets
-2. Risk Parity allocation 
+2. Risk Parity allocation
 3. Dynamic position sizing based on market conditions
 4. Cross-correlation analysis between markets
 5. Multi-objective optimization (return vs risk vs drawdown)
@@ -15,7 +15,7 @@ Based on latest research:
 
 Key innovations:
 - Uses Kelly Criterion for fund managers (not direct asset investment)
-- Adapts to both favorable and unfavorable market conditions  
+- Adapts to both favorable and unfavorable market conditions
 - Implements dynamic rebalancing based on market state
 - Risk-adjusted allocation rather than equal capital weights
 """
@@ -25,7 +25,7 @@ import logging
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, NamedTuple, Any
+from typing import Dict, List, Optional, Tuple, NamedTuple, Any, Union
 from dataclasses import dataclass
 from scipy.optimize import minimize, minimize_scalar
 import warnings
@@ -34,6 +34,8 @@ warnings.filterwarnings('ignore')
 from src.utils.database import DatabaseManager, Market, Position
 from src.clients.kalshi_client import KalshiClient
 from src.clients.xai_client import XAIClient
+from src.intelligence.enhanced_client import EnhancedAIClient
+from src.intelligence.ensemble_coordinator import EnsembleCoordinator
 from src.config.settings import settings
 from src.strategies.volatility_sizing import VolatilityAnalyzer, apply_volatility_adjustment
 from src.utils.logging_setup import get_trading_logger
@@ -54,13 +56,13 @@ class MarketOpportunity:
     max_loss: float
     time_to_expiry: float  # in days
     correlation_score: float  # correlation with portfolio
-    
+
     # Kelly metrics
     kelly_fraction: float
     fractional_kelly: float  # Conservative Kelly
     risk_adjusted_fraction: float
-    
-    # Portfolio metrics  
+
+    # Portfolio metrics
     sharpe_ratio: float
     sortino_ratio: float
     max_drawdown_contribution: float
@@ -76,11 +78,11 @@ class PortfolioAllocation:
     portfolio_sharpe: float
     max_portfolio_drawdown: float
     diversification_ratio: float
-    
+
     # Risk metrics
     portfolio_var_95: float  # Value at Risk
     portfolio_cvar_95: float  # Conditional Value at Risk
-    
+
     # Kelly metrics
     aggregate_kelly_fraction: float
     portfolio_growth_rate: float
@@ -89,40 +91,40 @@ class PortfolioAllocation:
 class AdvancedPortfolioOptimizer:
     """
     Advanced portfolio optimization using Kelly Criterion Extensions and modern portfolio theory.
-    
+
     This implements the latest research in prediction market portfolio optimization:
     - Kelly Criterion Extension (KCE) for dynamic market conditions
-    - Risk parity allocation for balanced risk exposure  
+    - Risk parity allocation for balanced risk exposure
     - Multi-factor optimization considering correlation, volatility, and drawdown
     - Dynamic rebalancing based on market regime detection
     """
-    
+
     def __init__(
         self,
         db_manager: DatabaseManager,
         kalshi_client: KalshiClient,
-        xai_client: XAIClient
+        xai_client: Union[XAIClient, EnhancedAIClient]
     ):
         self.db_manager = db_manager
         self.kalshi_client = kalshi_client
         self.xai_client = xai_client
         self.logger = get_trading_logger("portfolio_optimizer")
-        
+
         # Portfolio parameters
         self.total_capital = getattr(settings.trading, 'total_capital', 10000)
         self.max_position_fraction = getattr(settings.trading, 'max_single_position', 0.25)
         self.min_position_size = getattr(settings.trading, 'min_position_size', 5)
         self.kelly_fraction_multiplier = getattr(settings.trading, 'kelly_fraction', 0.25)  # Fractional Kelly
-        
+
         # Risk management
         self.max_portfolio_volatility = getattr(settings.trading, 'max_volatility', 0.20)
         self.max_correlation = getattr(settings.trading, 'max_correlation', 0.70)
         self.target_sharpe_ratio = getattr(settings.trading, 'target_sharpe', 2.0)
-        
+
         # Market regime detection
         self.market_state = "normal"  # normal, volatile, trending
         self.regime_lookback = 30  # days
-        
+
         # Performance tracking
         self.historical_allocations = []
         self.realized_returns = []
@@ -137,12 +139,12 @@ class AdvancedPortfolioOptimizer:
         )
 
     async def optimize_portfolio(
-        self, 
+        self,
         opportunities: List[MarketOpportunity]
     ) -> PortfolioAllocation:
         """
         Main portfolio optimization using advanced Kelly Criterion and risk parity.
-        
+
         Process:
         1. Calculate Kelly fractions for each opportunity
         2. Apply risk adjustments and correlations
@@ -151,31 +153,31 @@ class AdvancedPortfolioOptimizer:
         5. Return optimal allocation
         """
         self.logger.info(f"Optimizing portfolio across {len(opportunities)} opportunities")
-        
+
         if not opportunities:
             return self._empty_allocation()
-        
+
         # Limit opportunities to prevent optimization complexity
         max_opportunities = getattr(settings.trading, 'max_opportunities_per_batch', 50)
         if len(opportunities) > max_opportunities:
             # Sort by confidence * expected_return and take top N
             opportunities = sorted(
-                opportunities, 
-                key=lambda x: x.confidence * x.expected_return, 
+                opportunities,
+                key=lambda x: x.confidence * x.expected_return,
                 reverse=True
             )[:max_opportunities]
             self.logger.info(f"Limited to top {max_opportunities} opportunities for optimization")
-        
+
         try:
             # Step 1: Enhance opportunities with portfolio metrics
             enhanced_opportunities = await self._enhance_opportunities_with_metrics(opportunities)
-            
+
             # Step 2: Detect market regime and adjust parameters
             await self._detect_market_regime()
-            
+
             # Step 3: Calculate Kelly fractions
             kelly_fractions = await self._calculate_kelly_fractions(enhanced_opportunities)
-            
+
             # Step 3.5: Update opportunities with Kelly fractions
             for opp in enhanced_opportunities:
                 kelly_val = kelly_fractions.get(opp.market_id, 0.0)
@@ -183,7 +185,7 @@ class AdvancedPortfolioOptimizer:
                 opp.kelly_fraction = kelly_val
                 opp.fractional_kelly = kelly_val * 0.5  # Conservative Kelly
                 opp.risk_adjusted_fraction = kelly_val
-            
+
             # Step 4: Apply correlation adjustments
             correlation_matrix = await self._estimate_correlation_matrix(enhanced_opportunities)
             adjusted_fractions = self._apply_correlation_adjustments(kelly_fractions, correlation_matrix)
@@ -193,54 +195,54 @@ class AdvancedPortfolioOptimizer:
                 adjusted_fractions = self._apply_risk_parity_adjustment(
                     enhanced_opportunities, adjusted_fractions
                 )
-            
+
             # Step 5: Multi-objective optimization
             optimal_allocation = self._multi_objective_optimization(
                 enhanced_opportunities, adjusted_fractions, correlation_matrix
             )
-            
+
             # Step 6: Apply risk constraints
             final_allocation = self._apply_risk_constraints(optimal_allocation, enhanced_opportunities)
-            
+
             # Step 7: Calculate portfolio metrics
             portfolio_metrics = self._calculate_portfolio_metrics(
                 final_allocation, enhanced_opportunities, correlation_matrix
             )
-            
+
             result = PortfolioAllocation(
                 allocations=final_allocation,
                 **portfolio_metrics
             )
-            
+
             self.logger.info(
                 f"Portfolio optimization complete: "
                 f"Capital used: ${result.total_capital_used:.0f}, "
                 f"Expected return: {result.expected_portfolio_return:.1%}, "
                 f"Sharpe ratio: {result.portfolio_sharpe:.2f}"
             )
-            
+
             return result
-            
+
         except Exception as e:
             self.logger.error(f"Error in portfolio optimization: {e}")
             return self._empty_allocation()
 
     async def _enhance_opportunities_with_metrics(
-        self, 
+        self,
         opportunities: List[MarketOpportunity]
     ) -> List[MarketOpportunity]:
         """
         Enhance opportunities with additional portfolio metrics.
         """
         enhanced = []
-        
+
         for opp in opportunities:
             try:
                 # Calculate advanced metrics
                 sharpe_ratio = self._calculate_sharpe_ratio(opp)
                 sortino_ratio = self._calculate_sortino_ratio(opp)
                 max_dd_contribution = self._estimate_max_drawdown_contribution(opp)
-                
+
                 # Create enhanced opportunity
                 enhanced_opp = MarketOpportunity(
                     market_id=opp.market_id,
@@ -262,19 +264,19 @@ class AdvancedPortfolioOptimizer:
                     sortino_ratio=sortino_ratio,
                     max_drawdown_contribution=max_dd_contribution
                 )
-                
+
                 enhanced.append(enhanced_opp)
-                
+
             except Exception as e:
                 self.logger.error(f"Error enhancing opportunity {opp.market_id}: {e}")
                 continue
-        
+
         return enhanced
 
     async def _calculate_kelly_fractions(self, opportunities: List[MarketOpportunity]) -> Dict[str, float]:
         """
         Calculate Kelly fractions using the Kelly Criterion Extension (KCE).
-        
+
         Implements the advanced Kelly Criterion that adapts to market conditions:
         - Standard Kelly for high-confidence, low-correlation opportunities
         - Fractional Kelly for moderate confidence
@@ -290,12 +292,12 @@ class AdvancedPortfolioOptimizer:
             for opp in opportunities:
                 kelly_fractions[opp.market_id] = fixed_fraction * opp.confidence
             return kelly_fractions
-        
+
         for opp in opportunities:
             try:
                 # Calculate basic Kelly fraction: f* = (bp - q) / b
                 # Where p = win probability, q = lose probability, b = odds
-                
+
                 # Calculate win probability and odds based on the side being traded
                 if opp.edge > 0:  # Betting YES
                     win_prob = opp.predicted_probability
@@ -312,7 +314,7 @@ class AdvancedPortfolioOptimizer:
                         odds = opp.market_probability / (1 - opp.market_probability)
                     else:
                         odds = 1.0
-                
+
                 # Standard Kelly calculation - FIXED to handle both sides
                 # Kelly works as long as (odds * win_prob - lose_prob) > 0 (i.e. positive expected value)
                 if (odds * win_prob - lose_prob) > 0:
@@ -324,20 +326,20 @@ class AdvancedPortfolioOptimizer:
                 fee_rate = getattr(settings.trading, 'kalshi_fee_rate', 0.01)
                 slippage = getattr(settings.trading, 'expected_slippage', 0.005)
                 kelly_standard *= max(0.0, 1.0 - (fee_rate + slippage))
-                
+
                 # Apply Kelly Criterion Extension for dynamic markets
                 # Adjust for market regime and time decay
                 regime_multiplier = self._get_regime_multiplier()
                 time_decay_factor = max(0.1, min(1.0, opp.time_to_expiry / 30))  # Decay over 30 days
-                
+
                 kelly_kce = kelly_standard * regime_multiplier * time_decay_factor
-                
+
                 # Apply confidence adjustment
                 confidence_adjusted = kelly_kce * opp.confidence
-                
+
                 # Apply fractional Kelly (typically 25-50% of full Kelly)
                 fractional_kelly = confidence_adjusted * self.kelly_fraction_multiplier
-                
+
                 # Apply volatility-adjusted position sizing
                 if getattr(settings.trading, 'enable_volatility_sizing', True):
                     # Apply adjustment to fractional Kelly
@@ -363,34 +365,34 @@ class AdvancedPortfolioOptimizer:
                 if opp.confidence < settings.trading.min_confidence_for_large_size:
                     final_kelly = min(final_kelly, self.max_position_fraction * 0.5)
                 final_kelly = max(0.0, min(self.max_position_fraction, final_kelly))
-                
+
                 # Store calculations
                 opp.kelly_fraction = kelly_standard
                 opp.fractional_kelly = fractional_kelly
                 opp.risk_adjusted_fraction = final_kelly
-                
+
                 kelly_fractions[opp.market_id] = final_kelly
-                
+
                 self.logger.debug(
                     f"Kelly calculation for {opp.market_id}: "
                     f"Standard: {kelly_standard:.3f}, "
                     f"KCE: {kelly_kce:.3f}, "
                     f"Final: {final_kelly:.3f}"
                 )
-                
+
             except Exception as e:
                 self.logger.error(f"Error calculating Kelly for {opp.market_id}: {e}")
                 kelly_fractions[opp.market_id] = 0.0
-        
+
         return kelly_fractions
 
     async def _estimate_correlation_matrix(
-        self, 
+        self,
         opportunities: List[MarketOpportunity]
     ) -> np.ndarray:
         """
         Estimate correlation matrix between markets for portfolio optimization.
-        
+
         Uses multiple approaches:
         1. Category-based correlations
         2. Time-based correlations (similar expiry dates)
@@ -400,31 +402,31 @@ class AdvancedPortfolioOptimizer:
         n = len(opportunities)
         if n <= 1:
             return np.eye(1)
-            
+
         correlation_matrix = np.eye(n)
-        
+
         try:
             for i, opp1 in enumerate(opportunities):
                 for j, opp2 in enumerate(opportunities):
                     if i != j:
                         correlation = await self._estimate_pairwise_correlation(opp1, opp2)
                         correlation_matrix[i, j] = correlation
-                        
+
                         # Update correlation score in opportunity
                         opp1.correlation_score = max(opp1.correlation_score, abs(correlation))
-            
+
             # Ensure matrix is positive semidefinite
             correlation_matrix = self._ensure_positive_semidefinite(correlation_matrix)
-            
+
         except Exception as e:
             self.logger.error(f"Error estimating correlation matrix: {e}")
             correlation_matrix = np.eye(n)  # Fall back to identity matrix
-        
+
         return correlation_matrix
 
     async def _estimate_pairwise_correlation(
-        self, 
-        opp1: MarketOpportunity, 
+        self,
+        opp1: MarketOpportunity,
         opp2: MarketOpportunity
     ) -> float:
         """
@@ -433,24 +435,24 @@ class AdvancedPortfolioOptimizer:
         """
         try:
             correlation = 0.0
-            
+
             # 1. Category-based correlation (if markets are in same category)
             category_corr = await self._get_category_correlation(opp1.market_id, opp2.market_id)
-            
+
             # 2. Time-based correlation (similar expiry times)
             time_diff = abs(opp1.time_to_expiry - opp2.time_to_expiry)
             time_corr = max(0, 1 - (time_diff / 30))  # Decay over 30 days
-            
+
             # 3. Content similarity (use AI to assess)
             content_corr = await self._get_content_similarity(opp1, opp2)
-            
+
             # 4. Volatility similarity
             vol_diff = abs(opp1.volatility - opp2.volatility)
             vol_corr = max(0, 1 - vol_diff)
-            
+
             # 5. Historical price correlation (NEW - uses actual price data)
             historical_corr = await self._get_historical_price_correlation(opp1.market_id, opp2.market_id)
-            
+
             # Combine correlations with weights
             # If historical data available, give it significant weight
             if historical_corr is not None:
@@ -469,27 +471,27 @@ class AdvancedPortfolioOptimizer:
                     0.3 * content_corr +
                     0.1 * vol_corr
                 )
-            
+
             # Cap maximum correlation
             correlation = min(self.max_correlation, correlation)
-            
+
             return correlation
-            
+
         except Exception as e:
             self.logger.error(f"Error estimating pairwise correlation: {e}")
             return 0.1  # Small default correlation
-    
+
     async def _get_historical_price_correlation(
-        self, 
-        market_id1: str, 
+        self,
+        market_id1: str,
         market_id2: str
     ) -> Optional[float]:
         """
         Calculate correlation between two markets using historical price data.
-        
+
         Fetches price history from Kalshi API and computes Pearson correlation
         between price movements over the available overlapping time period.
-        
+
         Returns:
             Correlation coefficient (-1 to 1) or None if insufficient data.
         """
@@ -497,116 +499,116 @@ class AdvancedPortfolioOptimizer:
             # Fetch price history for both markets (last 7 days)
             end_ts = int(datetime.now().timestamp())
             start_ts = int((datetime.now() - timedelta(days=7)).timestamp())
-            
+
             history1 = await self.kalshi_client.get_market_history(
-                ticker=market_id1, 
-                start_ts=start_ts, 
-                end_ts=end_ts, 
+                ticker=market_id1,
+                start_ts=start_ts,
+                end_ts=end_ts,
                 limit=100
             )
             history2 = await self.kalshi_client.get_market_history(
-                ticker=market_id2, 
-                start_ts=start_ts, 
-                end_ts=end_ts, 
+                ticker=market_id2,
+                start_ts=start_ts,
+                end_ts=end_ts,
                 limit=100
             )
-            
+
             # Extract price series
             prices1 = history1.get('history', [])
             prices2 = history2.get('history', [])
-            
+
             # Need at least 10 data points for meaningful correlation
             if len(prices1) < 10 or len(prices2) < 10:
                 return None
-            
+
             # Create time-aligned price DataFrames
             df1 = pd.DataFrame(prices1)
             df2 = pd.DataFrame(prices2)
-            
+
             # Ensure we have the expected columns
             if 'ts' not in df1.columns or 'yes_price' not in df1.columns:
                 return None
             if 'ts' not in df2.columns or 'yes_price' not in df2.columns:
                 return None
-            
+
             # Convert timestamps and set as index
             df1['ts'] = pd.to_datetime(df1['ts'], unit='s')
             df2['ts'] = pd.to_datetime(df2['ts'], unit='s')
             df1.set_index('ts', inplace=True)
             df2.set_index('ts', inplace=True)
-            
+
             # Resample to hourly to align timestamps
             prices_series1 = df1['yes_price'].resample('1h').last().dropna()
             prices_series2 = df2['yes_price'].resample('1h').last().dropna()
-            
+
             # Find overlapping timestamps
             common_idx = prices_series1.index.intersection(prices_series2.index)
-            
+
             if len(common_idx) < 10:
                 return None
-            
+
             # Calculate price returns (differences)
             aligned1 = prices_series1.loc[common_idx].diff().dropna()
             aligned2 = prices_series2.loc[common_idx].diff().dropna()
-            
+
             if len(aligned1) < 5:
                 return None
-            
+
             # Calculate Pearson correlation
             correlation = aligned1.corr(aligned2)
-            
+
             # Handle NaN result
             if pd.isna(correlation):
                 return None
-            
+
             self.logger.debug(
                 f"Historical correlation {market_id1[:10]}/{market_id2[:10]}: {correlation:.3f}"
             )
-            
+
             return float(correlation)
-            
+
         except Exception as e:
             self.logger.debug(f"Could not compute historical correlation: {e}")
             return None  # Return None so caller uses heuristic fallback
 
     def _apply_correlation_adjustments(
         self,
-        kelly_fractions: Dict[str, float], 
+        kelly_fractions: Dict[str, float],
         correlation_matrix: np.ndarray
     ) -> Dict[str, float]:
         """
         Adjust Kelly fractions based on correlations to reduce portfolio risk.
-        
+
         High correlations reduce effective diversification, so we scale down allocations
         to highly correlated markets.
         """
         adjusted_fractions = kelly_fractions.copy()
         market_ids = list(kelly_fractions.keys())
-        
+
         try:
             for i, market_id in enumerate(market_ids):
                 # Calculate average correlation with other markets
                 avg_correlation = np.mean([
-                    abs(correlation_matrix[i, j]) 
-                    for j in range(len(market_ids)) 
+                    abs(correlation_matrix[i, j])
+                    for j in range(len(market_ids))
                     if i != j
                 ])
-                
+
                 # Adjust fraction based on correlation
                 # Higher correlation -> lower allocation
                 correlation_penalty = 1 - (avg_correlation * 0.5)  # Max 50% penalty
-                
+
                 adjusted_fractions[market_id] *= correlation_penalty
-                
+
                 self.logger.debug(
                     f"Correlation adjustment for {market_id}: "
                     f"Avg corr: {avg_correlation:.3f}, "
                     f"Penalty: {correlation_penalty:.3f}"
                 )
-        
+
         except Exception as e:
             self.logger.error(f"Error applying correlation adjustments: {e}")
-        
+
         return adjusted_fractions
 
     def _apply_risk_parity_adjustment(
@@ -644,10 +646,10 @@ class AdvancedPortfolioOptimizer:
     ) -> Dict[str, float]:
         """
         Multi-objective optimization balancing return, risk, and diversification.
-        
+
         Objective function combines:
         1. Expected return (maximize)
-        2. Portfolio volatility (minimize)  
+        2. Portfolio volatility (minimize)
         3. Maximum drawdown (minimize)
         4. Diversification ratio (maximize)
         5. Sharpe ratio (maximize)
@@ -656,51 +658,51 @@ class AdvancedPortfolioOptimizer:
             n = len(opportunities)
             if n == 0:
                 return {}
-            
+
             # Initial allocation from Kelly fractions
             initial_weights = np.array([kelly_fractions.get(opp.market_id, 0) for opp in opportunities])
-            
+
             # Normalize to sum to 1 or less
             if initial_weights.sum() > 1.0:
                 initial_weights = initial_weights / initial_weights.sum()
-            
+
             # If initial weights are all zero or very small, use simple fallback
             if initial_weights.sum() < 0.001:
                 self.logger.warning("Initial weights too small, using simple allocation fallback")
                 return self._simple_allocation_fallback(opportunities)
-            
+
             # Expected returns vector
             expected_returns = np.array([opp.expected_return for opp in opportunities])
-            
+
             # Volatilities vector
             volatilities = np.array([opp.volatility for opp in opportunities])
-            
+
             # Create covariance matrix from correlations and volatilities
             covariance_matrix = np.outer(volatilities, volatilities) * correlation_matrix
-            
+
             def objective_function(weights):
                 """Multi-objective function to minimize."""
                 try:
                     # Ensure weights are valid
                     if np.any(weights < 0) or np.sum(weights) > 1.0001:  # Small tolerance
                         return 1e6
-                    
+
                     # Portfolio return
                     portfolio_return = np.dot(weights, expected_returns)
-                    
+
                     # Portfolio volatility
                     portfolio_vol = np.sqrt(np.dot(weights, np.dot(covariance_matrix, weights)))
-                    
+
                     # Diversification ratio (higher is better)
                     weighted_vol = np.dot(weights, volatilities)
                     diversification_ratio = weighted_vol / (portfolio_vol + 1e-8)
-                    
+
                     # Sharpe ratio approximation
                     sharpe = (portfolio_return / (portfolio_vol + 1e-8))
-                    
+
                     # Maximum drawdown approximation
                     max_dd = self._estimate_portfolio_max_drawdown(weights, opportunities)
-                    
+
                     # Multi-objective score (higher is better, so we minimize negative)
                     # FIXED: Much less conservative - focus on returns, light risk penalty
                     score = -(
@@ -710,12 +712,12 @@ class AdvancedPortfolioOptimizer:
                         0.2 * portfolio_vol -         # Light volatility penalty (was 1.0)
                         0.1 * max_dd                  # Very light drawdown penalty (was 1.0)
                     )
-                    
+
                     return score
-                    
+
                 except Exception as e:
                     return 1e6  # Large penalty for errors
-            
+
             # Try optimization with more relaxed constraints
             try:
                 # Constraints - force meaningful allocation
@@ -723,10 +725,10 @@ class AdvancedPortfolioOptimizer:
                     {'type': 'ineq', 'fun': lambda w: 0.80 - np.sum(w)},  # Sum <= 80% (reasonable max)
                     {'type': 'ineq', 'fun': lambda w: np.sum(w) - 0.05},  # Sum >= 5% (force minimum allocation)
                 ]
-                
+
                 # Bounds for each weight
                 bounds = [(0, min(self.max_position_fraction, 0.3)) for _ in range(n)]  # Cap at 30%
-                
+
                 # Optimize
                 result = minimize(
                     objective_function,
@@ -736,27 +738,27 @@ class AdvancedPortfolioOptimizer:
                     constraints=constraints,
                     options={'maxiter': 500, 'ftol': 1e-6}  # More relaxed tolerance
                 )
-                
+
                 if result.success and np.sum(result.x) > 0.001:
                     optimal_weights = result.x
                     self.logger.info(f"Optimization successful with sum: {np.sum(optimal_weights):.3f}")
                 else:
                     self.logger.warning(f"Optimization failed: {result.message}")
                     raise Exception("Optimization failed")
-                    
+
             except Exception as e:
                 self.logger.warning(f"Scipy optimization failed: {e}, using simple fallback")
                 return self._simple_allocation_fallback(opportunities)
-            
+
             # Convert back to dictionary
             optimal_allocation = {
-                opp.market_id: float(optimal_weights[i]) 
+                opp.market_id: float(optimal_weights[i])
                 for i, opp in enumerate(opportunities)
                 if optimal_weights[i] > 0.001  # Filter tiny allocations
             }
-            
+
             return optimal_allocation
-            
+
         except Exception as e:
             self.logger.error(f"Error in multi-objective optimization: {e}")
             # Fall back to simple allocation
@@ -770,29 +772,29 @@ class AdvancedPortfolioOptimizer:
         try:
             if not opportunities:
                 return {}
-            
+
             # Calculate scores for each opportunity
             scores = []
             for opp in opportunities:
                 # Score based on expected return, confidence, and edge
                 score = opp.expected_return * opp.confidence * max(0, abs(opp.edge))
                 scores.append((opp.market_id, score))
-            
+
             # Sort by score
             scores.sort(key=lambda x: x[1], reverse=True)
-            
+
             # Simple allocation: give more to higher scoring opportunities
             allocation = {}
             total_allocation = 0.0
             max_positions = min(5, len(opportunities))  # Limit to top 5 positions
-            
+
             for i, (market_id, score) in enumerate(scores[:max_positions]):
                 if score <= 0:
                     continue
-                    
+
                 # Allocate more to higher ranked opportunities
                 weight = max(0.05, 0.25 - (i * 0.03))  # Start at 25%, decrease by 3% each rank
-                
+
                 # Don't exceed total capital
                 if total_allocation + weight <= 0.8:  # Max 80% allocation
                     allocation[market_id] = weight
@@ -802,17 +804,17 @@ class AdvancedPortfolioOptimizer:
                     if remaining > 0.01:  # Only if meaningful allocation left
                         allocation[market_id] = remaining
                     break
-            
+
             self.logger.info(f"Simple fallback allocation: {len(allocation)} positions, {total_allocation:.1%} capital")
             return allocation
-            
+
         except Exception as e:
             self.logger.error(f"Error in simple allocation fallback: {e}")
             return {}
 
     def _apply_risk_constraints(
-        self, 
-        allocation: Dict[str, float], 
+        self,
+        allocation: Dict[str, float],
         opportunities: List[MarketOpportunity]
     ) -> Dict[str, float]:
         """
@@ -823,21 +825,21 @@ class AdvancedPortfolioOptimizer:
             total_allocation = 0.0
             sector_allocations: Dict[str, float] = {}
             max_sector = getattr(settings.trading, "max_sector_exposure", 1.0)
-            
+
             for market_id, fraction in allocation.items():
                 # Find the opportunity
                 opp = next((o for o in opportunities if o.market_id == market_id), None)
                 if not opp:
                     continue
-                
+
                 # Apply minimum position size
                 dollar_allocation = fraction * self.total_capital
                 if dollar_allocation < self.min_position_size:
                     continue
-                
+
                 # Apply maximum position fraction
                 final_fraction = min(fraction, self.max_position_fraction)
-                
+
                 # Check sector exposure
                 current_sector = sector_allocations.get(opp.category, 0.0)
                 if current_sector + final_fraction > max_sector:
@@ -858,12 +860,12 @@ class AdvancedPortfolioOptimizer:
                         total_allocation = 1.0
                         sector_allocations[opp.category] = current_sector + remaining
                     break
-            
+
             self.logger.info(f"Risk constraints applied. Total allocation: {total_allocation:.3f}")
             self.logger.info(f"Final constrained allocations: {constrained_allocation}")
-            
+
             return constrained_allocation
-            
+
         except Exception as e:
             self.logger.error(f"Error applying risk constraints: {e}")
             return allocation
@@ -880,16 +882,16 @@ class AdvancedPortfolioOptimizer:
         try:
             if not allocation:
                 return self._empty_portfolio_metrics()
-            
+
             # Get vectors for allocated opportunities
             allocated_opps = [opp for opp in opportunities if opp.market_id in allocation]
             weights = np.array([allocation[opp.market_id] for opp in allocated_opps])
             returns = np.array([opp.expected_return for opp in allocated_opps])
             volatilities = np.array([opp.volatility for opp in allocated_opps])
-            
+
             # Portfolio return
             portfolio_return = np.dot(weights, returns)
-            
+
             # Portfolio volatility
             n = len(allocated_opps)
             if n > 1:
@@ -900,32 +902,32 @@ class AdvancedPortfolioOptimizer:
                 portfolio_vol = np.sqrt(np.dot(weights, np.dot(covariance_matrix, weights)))
             else:
                 portfolio_vol = volatilities[0] * weights[0] if len(volatilities) > 0 else 0.0
-            
+
             # Sharpe ratio
             portfolio_sharpe = portfolio_return / (portfolio_vol + 1e-8)
-            
+
             # Diversification ratio
             weighted_vol = np.dot(weights, volatilities)
             diversification_ratio = weighted_vol / (portfolio_vol + 1e-8)
-            
+
             # Capital usage
             total_capital_used = sum(allocation.values()) * self.total_capital
-            
+
             # Risk metrics (simplified)
             portfolio_var_95 = portfolio_vol * 1.645  # 95% VaR
             portfolio_cvar_95 = portfolio_var_95 * 1.2  # Approximate CVaR
-            
+
             # Kelly metrics
             aggregate_kelly = sum(
-                opp.kelly_fraction * allocation[opp.market_id] 
+                opp.kelly_fraction * allocation[opp.market_id]
                 for opp in allocated_opps
             )
-            
+
             portfolio_growth_rate = portfolio_return - (portfolio_vol ** 2) / 2  # Geometric return approximation
-            
+
             # Maximum drawdown
             max_portfolio_drawdown = self._estimate_portfolio_max_drawdown(weights, allocated_opps)
-            
+
             return {
                 'total_capital_used': total_capital_used,
                 'expected_portfolio_return': portfolio_return,
@@ -938,18 +940,18 @@ class AdvancedPortfolioOptimizer:
                 'aggregate_kelly_fraction': aggregate_kelly,
                 'portfolio_growth_rate': portfolio_growth_rate
             }
-            
+
         except Exception as e:
             self.logger.error(f"Error calculating portfolio metrics: {e}")
             return self._empty_portfolio_metrics()
 
     # Helper methods
-    
+
     async def _detect_market_regime(self):
         """Detect current market regime for Kelly adjustments."""
         # Simplified regime detection - in production would use more sophisticated methods
         self.market_state = "normal"  # Default
-    
+
     def _get_regime_multiplier(self) -> float:
         """Get Kelly multiplier based on market regime."""
         regime_multipliers = {
@@ -958,32 +960,32 @@ class AdvancedPortfolioOptimizer:
             "trending": 1.2   # Increase Kelly in trending markets
         }
         return regime_multipliers.get(self.market_state, 1.0)
-    
+
     def _calculate_sharpe_ratio(self, opp: MarketOpportunity) -> float:
         """Calculate Sharpe ratio for opportunity."""
         return opp.expected_return / (opp.volatility + 1e-8)
-    
+
     def _calculate_sortino_ratio(self, opp: MarketOpportunity) -> float:
         """Calculate Sortino ratio (downside deviation)."""
         # Simplified - assumes normal distribution
         downside_vol = opp.volatility * 0.7  # Approximation
         return opp.expected_return / (downside_vol + 1e-8)
-    
+
     def _estimate_max_drawdown_contribution(self, opp: MarketOpportunity) -> float:
         """Estimate maximum drawdown contribution."""
         # Simplified approximation
         return opp.volatility * 2.0
-    
+
     async def _get_category_correlation(self, market_id1: str, market_id2: str) -> float:
         """Get correlation based on market categories."""
         # Simplified - would query market metadata
         return 0.1  # Default low correlation
-    
+
     async def _get_content_similarity(self, opp1: MarketOpportunity, opp2: MarketOpportunity) -> float:
         """Get content similarity using AI."""
         # Simplified - would use embeddings or AI analysis
         return 0.1  # Default low similarity
-    
+
     def _ensure_positive_semidefinite(self, matrix: np.ndarray) -> np.ndarray:
         """Ensure correlation matrix is positive semidefinite."""
         try:
@@ -992,20 +994,20 @@ class AdvancedPortfolioOptimizer:
             return eigenvecs @ np.diag(eigenvals) @ eigenvecs.T
         except:
             return np.eye(matrix.shape[0])
-    
+
     def _estimate_portfolio_max_drawdown(self, weights: np.ndarray, opportunities: List[MarketOpportunity]) -> float:
         """Estimate portfolio maximum drawdown."""
         # Simplified approximation
         individual_mdd = np.array([opp.max_drawdown_contribution for opp in opportunities])
         return np.dot(weights, individual_mdd) * 0.8  # Diversification benefit
-    
+
     def _empty_allocation(self) -> PortfolioAllocation:
         """Return empty portfolio allocation."""
         return PortfolioAllocation(
             allocations={},
             **self._empty_portfolio_metrics()
         )
-    
+
     def _empty_portfolio_metrics(self) -> Dict:
         """Return empty portfolio metrics."""
         return {
@@ -1022,22 +1024,105 @@ class AdvancedPortfolioOptimizer:
         }
 
 
+def validate_ai_exit_levels(stop_loss_cents: float, take_profit_cents: float, entry_price: float, side: str, logger=None) -> bool:
+    """
+    Validate AI-recommended stop loss and take profit levels for safety and reasonableness.
+
+    Security validation ensures AI recommendations cannot cause dangerous trading behavior:
+    1. Reasonable value ranges (1-99 cents)
+    2. Logical relationships with entry price and side
+    3. Risk/reward ratio within acceptable bounds
+    4. Not allowing extreme leverage or certain losses
+
+    Args:
+        stop_loss_cents: AI-recommended stop loss in cents
+        take_profit_cents: AI-recommended take profit in cents
+        entry_price: Current entry price in dollars
+        side: Trading side ("YES" or "NO")
+        logger: Logger instance (optional)
+
+    Returns:
+        bool: True if values are safe and reasonable, False if rejected
+    """
+    if logger is None:
+        import logging
+        logger = logging.getLogger(__name__)
+
+    try:
+        # Convert to dollars for validation
+        stop_loss = stop_loss_cents / 100
+        take_profit = take_profit_cents / 100
+
+        # Basic range validation (1-99 cents = $0.01-$0.99)
+        if not (1 <= stop_loss_cents <= 99 and 1 <= take_profit_cents <= 99):
+            logger.warning(f"🚨 AI exit levels out of range: SL={stop_loss_cents}c, TP={take_profit_cents}c (must be 1-99c)")
+            return False
+
+        # Validate relationship with entry price based on side
+        if side.upper() == "YES":
+            # For YES contracts: lower prices are worse, higher prices are better
+            # Stop loss should be below entry, take profit should be above entry
+            if not (stop_loss < entry_price < take_profit):
+                logger.warning(f"🚨 AI YES exit levels invalid: SL={stop_loss:.2f} < entry={entry_price:.2f} < TP={take_profit:.2f} required")
+                return False
+        elif side.upper() == "NO":
+            # For NO contracts: higher prices are worse, lower prices are better
+            # Stop loss should be above entry, take profit should be below entry
+            if not (stop_loss > entry_price > take_profit):
+                logger.warning(f"🚨 AI NO exit levels invalid: SL={stop_loss:.2f} > entry={entry_price:.2f} > TP={take_profit:.2f} required")
+                return False
+
+        # Risk/reward ratio validation (avoid excessive risk)
+        potential_loss = abs(entry_price - stop_loss)
+        potential_profit = abs(take_profit - entry_price)
+
+        if potential_loss <= 0:
+            logger.warning("🚨 AI exit levels would not protect against losses")
+            return False
+
+        # Risk/reward ratio should be at least 1:1 (avoid risky trades)
+        risk_reward_ratio = potential_profit / potential_loss
+        if risk_reward_ratio < 0.8:  # Allow slightly unfavorable but not excessive
+            logger.warning(f"🚨 AI exit levels poor risk/reward: {risk_reward_ratio:.2f} (minimum 0.8)")
+            return False
+
+        # Maximum potential loss should not exceed 50% of entry value
+        max_loss_pct = (potential_loss / entry_price) * 100 if entry_price > 0 else 100
+        if max_loss_pct > 50:
+            logger.warning(f"🚨 AI exit levels excessive risk: {max_loss_pct:.1f}% loss (max 50%)")
+            return False
+
+        # Maximum potential profit should not be unrealistic (>10x entry value)
+        max_profit_pct = (potential_profit / entry_price) if entry_price > 0 else 10
+        if max_profit_pct > 10:
+            logger.warning(f"🚨 AI exit levels unrealistic profit: {max_profit_pct:.1f}x return (max 10x)")
+            return False
+
+        # Passed all validations
+        logger.info(f"✅ AI exit levels validated: SL={stop_loss:.2f}, TP={take_profit:.2f}, RR={risk_reward_ratio:.2f}x")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error validating AI exit levels: {e}")
+        return False
+
+
 async def create_market_opportunities_from_markets(
     markets: List[Market],
-    xai_client: XAIClient,
+    xai_client: Union[XAIClient, EnhancedAIClient],
     kalshi_client: KalshiClient,
     db_manager: DatabaseManager = None,
     total_capital: float = 10000
 ) -> List[MarketOpportunity]:
     """
     Convert Market objects to MarketOpportunity objects with all required metrics.
-    
+
     NOTE: KXMV prefix is now standard for all Kalshi sports markets (NFL, NBA, etc.)
     We no longer filter by ticker prefix.
     """
     logger = get_trading_logger("portfolio_opportunities")
     opportunities = []
-    
+
     # Limit markets to prevent excessive AI costs and focus on best opportunities
     # LIMIT: Analyze reasonable number of markets for AI processing
     max_markets_to_analyze = max(10, settings.trading.num_processor_workers * 5)  # 10 markets (conservative)
@@ -1045,26 +1130,32 @@ async def create_market_opportunities_from_markets(
         # Sort by volume and take top markets
         markets = sorted(markets, key=lambda m: m.volume, reverse=True)[:max_markets_to_analyze]
         logger.info(f"Limited to top {max_markets_to_analyze} markets by volume for AI analysis")
-    
+
     for market in markets:
         try:
+            # 🚫 Skip MULTIGAME combo markets early (blocked in execute_position anyway)
+            # This saves AI credits by not analyzing markets that will be rejected
+            if "MULTIGAME" in market.market_id:
+                logger.info(f"⏭️ Skipping {market.market_id} - MULTIGAME combo markets blocked")
+                continue
+
             # Get current market data
             market_data = await kalshi_client.get_market(market.market_id)
             if not market_data:
                 logger.info(f"⏭️ Skipping {market.market_id} - No market data returned from API")
                 continue
-            
+
             # FIXED: Extract from nested 'market' object (same fix as immediate trading)
             market_info = market_data.get('market', {})
             market_prob = market_info.get('yes_price', 50) / 100
-            
+
             # 🚨 CRITICAL FIX: Check market status BEFORE AI analysis to avoid wasting credits
             # This prevents analyzing markets that are already finalized/closed/settled
             market_status = market_info.get('status', '')
             if market_status not in ['active', 'open']:
                 logger.info(f"⏭️ Skipping {market.market_id} - Market status: {market_status} (not tradeable)")
                 continue
-            
+
             # Skip markets with extreme prices (too risky for portfolio)
             # RELAXED: 3%-97% range instead of 5%-95% to allow more opportunities
             if market_prob < 0.03 or market_prob > 0.97:
@@ -1076,7 +1167,7 @@ async def create_market_opportunities_from_markets(
             if price_movement < settings.trading.min_price_movement:
                 logger.info(f"⏭️ Skipping {market.market_id} - Insufficient movement: {price_movement:.1%} < {settings.trading.min_price_movement:.1%}")
                 continue
-            
+
             # Get technical analysis if enabled
             ml_prediction = None
             if getattr(settings.trading, 'enable_ml_predictions', True):
@@ -1092,7 +1183,7 @@ async def create_market_opportunities_from_markets(
             predicted_prob, confidence = await _get_fast_ai_prediction(
                 market, xai_client, market_prob, ml_prediction
             )
-            
+
             # If AI analysis failed, skip this market
             if predicted_prob is None or confidence is None:
                 logger.warning(f"⏭️ AI analysis failed for {market.market_id} - predicted_prob={predicted_prob}, confidence={confidence}")
@@ -1108,24 +1199,53 @@ async def create_market_opportunities_from_markets(
                     f"({confidence:.1%} < {settings.trading.min_confidence_to_trade:.1%})"
                 )
                 continue
-            
+
             # Calculate metrics
             edge = predicted_prob - market_prob
             expected_return = abs(edge) * confidence
             volatility = np.sqrt(market_prob * (1 - market_prob))
             max_loss = market_prob if edge > 0 else (1 - market_prob)
+
+            # Time to expiry - PRIORITIZE expected_expiration_time (actual event time) over close_time (fallback)
+            # close_time is often weeks away as a fallback, but expected_expiration_time is the real event time
+            time_to_expiry = 30.0  # Default fallback (will be filtered out by expiry check)
+            import time
+            from datetime import datetime as dt
             
-            # Time to expiry
-            time_to_expiry = 30.0  # Default 30 days
-            if hasattr(market, 'expiration_ts') and market.expiration_ts:
-                import time
+            # Check for event-related time fields in priority order:
+            # 1. expected_expiration_time - the actual expected event resolution time
+            # 2. expiration_time - when the market expires
+            # 3. close_time - fallback market closure (often far in future)
+            time_field_used = None
+            expiry_time_str = None
+            
+            for field_name in ['expected_expiration_time', 'expiration_time', 'close_time']:
+                expiry_time_str = market_info.get(field_name)
+                if expiry_time_str:
+                    time_field_used = field_name
+                    break
+            
+            if expiry_time_str:
+                try:
+                    # Parse ISO 8601 timestamp
+                    if expiry_time_str.endswith('Z'):
+                        expiry_time_str = expiry_time_str[:-1] + '+00:00'
+                    expiry_dt = dt.fromisoformat(expiry_time_str)
+                    now_dt = dt.now(expiry_dt.tzinfo) if expiry_dt.tzinfo else dt.utcnow()
+                    time_to_expiry = (expiry_dt - now_dt).total_seconds() / 86400
+                    time_to_expiry = max(0.01, time_to_expiry)  # At least ~15 minutes
+                    logger.info(f"📅 {market.market_id}: Event in {time_to_expiry:.2f} days (from {time_field_used}: {expiry_time_str})")
+                except Exception as parse_error:
+                    logger.warning(f"Could not parse {time_field_used} '{expiry_time_str}': {parse_error}")
+            elif hasattr(market, 'expiration_ts') and market.expiration_ts and market.expiration_ts > 0:
+                # Fallback to stored expiration timestamp
                 time_to_expiry = (market.expiration_ts - time.time()) / 86400
-                time_to_expiry = max(0.1, time_to_expiry)
-            
+                time_to_expiry = max(0.01, time_to_expiry)
+
             # Apply Grok4 edge filtering - 10% minimum edge requirement
             from src.utils.edge_filter import EdgeFilter
             edge_result = EdgeFilter.calculate_edge(predicted_prob, market_prob, confidence)
-            
+
             if edge_result.passes_filter:  # Must pass 10% edge filter
                 opportunity = MarketOpportunity(
                     market_id=market.market_id,
@@ -1147,15 +1267,15 @@ async def create_market_opportunities_from_markets(
                     sortino_ratio=0.0,
                     max_drawdown_contribution=0.0
                 )
-                
+
                 # Add edge filter results to opportunity
                 opportunity.edge = edge_result.edge_magnitude  # Use filtered edge
                 opportunity.edge_percentage = edge_result.edge_percentage
                 opportunity.recommended_side = edge_result.side
-                
+
                 opportunities.append(opportunity)
                 logger.info(f"✅ EDGE APPROVED: {market.market_id} - Edge: {edge_result.edge_percentage:.1%} ({edge_result.side}), Confidence: {confidence:.1%}, Reason: {edge_result.reason}")
-                
+
                 # 🚀 IMMEDIATE TRADING: Place trade for strong opportunities
                 if db_manager:
                     await _evaluate_immediate_trade(
@@ -1163,18 +1283,18 @@ async def create_market_opportunities_from_markets(
                     )
             else:
                 logger.info(f"❌ EDGE FILTERED: {market.market_id} - {edge_result.reason}")
-            
+
         except Exception as e:
             logger.error(f"Error creating opportunity from {market.market_id}: {e}")
             continue
-    
+
     logger.info(f"Created {len(opportunities)} opportunities from {len(markets)} markets")
     return opportunities
 
 async def _evaluate_immediate_trade(
-    opportunity: MarketOpportunity, 
-    db_manager: DatabaseManager, 
-    kalshi_client: KalshiClient, 
+    opportunity: MarketOpportunity,
+    db_manager: DatabaseManager,
+    kalshi_client: KalshiClient,
     xai_client: XAIClient,
     total_capital: float
 ) -> None:
@@ -1183,11 +1303,11 @@ async def _evaluate_immediate_trade(
     For strong opportunities, place trade right away instead of waiting for batch optimization.
     """
     logger = get_trading_logger("immediate_trading")  # Move logger definition to the top
-    
+
     try:
         # Use enhanced edge filtering for immediate trading decisions
         from src.utils.edge_filter import EdgeFilter
-        
+
         # Check if opportunity meets immediate trading criteria using edge filter
         should_trade, trade_reason, edge_result = EdgeFilter.should_trade_market(
             ai_probability=opportunity.predicted_probability,
@@ -1195,36 +1315,56 @@ async def _evaluate_immediate_trade(
             confidence=opportunity.confidence,
             additional_filters={
                 'volume': getattr(opportunity, 'volume', 1000),
-                'min_volume': 1000,
                 'time_to_expiry_days': opportunity.time_to_expiry,
-                'max_time_to_expiry': 365
+                'max_time_to_expiry': settings.trading.max_time_to_expiry_days  # FIXED: Use settings (24 hours)
             }
         )
-        
+
         # Additional criteria for immediate execution - CONSERVATIVE
+        # Check if opportunity meets edge filtering requirements
+        from src.utils.edge_filter import get_minimum_edge_for_confidence
+        min_edge_required = get_minimum_edge_for_confidence(opportunity.confidence)
+
         strong_opportunity = (
             should_trade and
-            edge_result.edge_percentage >= 0.10 and  # RESTORED: 10% edge requirement
-            opportunity.confidence >= 0.60 and       # RESTORED: 60% confidence
+            edge_result.edge_percentage >= min_edge_required and  # DYNAMIC: Use edge filter thresholds
+            opportunity.confidence >= 0.50 and       # UPDATED: Use edge filter minimum confidence
             opportunity.expected_return >= 0.05      # RESTORED: 5% expected return
         )
-        
+
+        logger.info(
+            f"🔍 Immediate trade check for {opportunity.market_id}: "
+            f"should_trade={should_trade}, edge={edge_result.edge_percentage:.1%}(need>={min_edge_required:.1%}), "
+            f"confidence={opportunity.confidence:.1%}(need>=50%), "
+            f"expected_return={opportunity.expected_return:.1%}(need>=5%)"
+        )
+
         if not strong_opportunity:
+            which_failed = []
+            if not should_trade:
+                which_failed.append(f"should_trade=False ({trade_reason})")  # Include the reason!
+            if edge_result.edge_percentage < min_edge_required:
+                which_failed.append(f"edge {edge_result.edge_percentage:.1%} < {min_edge_required:.1%}")
+            if opportunity.confidence < 0.50:
+                which_failed.append(f"confidence {opportunity.confidence:.1%} < 50%")
+            if opportunity.expected_return < 0.05:
+                which_failed.append(f"expected_return {opportunity.expected_return:.1%} < 5%")
+            logger.info(f"⏭️ Not strong enough for immediate trade: {', '.join(which_failed)}")
             return  # Not strong enough for immediate action
-        
+
         # Check position limits and get maximum allowed position size
         from src.utils.position_limits import check_can_add_position
-        
+
         # Get portfolio value for position sizing
         try:
             balance_response = await kalshi_client.get_balance()
             available_cash = balance_response.get('balance', 0) / 100  # Convert cents to dollars
-            
+
             # Get current positions to calculate total portfolio value
             positions_response = await kalshi_client.get_positions()
             positions = positions_response.get('positions', []) if isinstance(positions_response, dict) else []
             total_position_value = 0
-            
+
             if positions:
                 for position in positions:
                     if not isinstance(position, dict):
@@ -1245,50 +1385,50 @@ async def _evaluate_immediate_trade(
                         except:
                             # If we can't get market data, estimate at entry price
                             total_position_value += abs(quantity) * 0.50  # Conservative 50¢ estimate
-            
+
             total_portfolio_value = available_cash + total_position_value
             logger.info(f"💰 Portfolio value: Cash=${available_cash:.2f} + Positions=${total_position_value:.2f} = Total=${total_portfolio_value:.2f}")
-            
+
         except Exception as e:
             logger.warning(f"Could not get portfolio value, using available cash: {e}")
             total_portfolio_value = total_capital
             available_cash = total_capital
-        
+
         # Calculate Kelly-optimal position size
         kelly_fraction = _calculate_simple_kelly(opportunity)
         kelly_multiplier = settings.trading.kelly_fraction  # Use configured Kelly fraction (0.75)
         kelly_position_size = kelly_fraction * kelly_multiplier * total_portfolio_value
-        
+
         # Safety cap: never exceed configured max per position
         max_single_position_pct = settings.trading.max_single_position  # Safety cap from config
         safety_cap = total_portfolio_value * max_single_position_pct
-        
+
         # Cash availability constraint
         cash_limit = available_cash * 0.8  # Don't use more than 80% of available cash
-        
+
         # Initial position size: Kelly-optimal, but capped for safety and cash availability
         initial_position_size = min(
             kelly_position_size,  # Kelly-optimal size
             safety_cap,          # Safety cap (5% max)
             cash_limit           # Available cash constraint
         )
-        
+
         # Check position limits with actual calculated size
         can_add_position, limit_reason = await check_can_add_position(
             initial_position_size, db_manager, kalshi_client
         )
-        
+
         if not can_add_position:
             # Instead of blocking, try to find a smaller position size that fits
             logger.info(f"⚠️ Position size ${initial_position_size:.2f} exceeds limits, attempting to reduce...")
-            
+
             # Try progressively smaller position sizes
             for reduction_factor in [0.8, 0.6, 0.4, 0.2, 0.1]:
                 reduced_position_size = initial_position_size * reduction_factor
                 can_add_reduced, reduced_reason = await check_can_add_position(
                     reduced_position_size, db_manager, kalshi_client
                 )
-                
+
                 if can_add_reduced:
                     initial_position_size = reduced_position_size
                     logger.info(f"✅ Position size reduced to ${initial_position_size:.2f} to fit limits")
@@ -1298,16 +1438,16 @@ async def _evaluate_immediate_trade(
                 from src.utils.position_limits import PositionLimitsManager
                 limits_manager = PositionLimitsManager(db_manager, kalshi_client)
                 current_positions = await limits_manager._get_position_count()
-                
+
                 if current_positions >= limits_manager.max_positions:
                     logger.info(f"❌ POSITION COUNT LIMIT: {current_positions}/{limits_manager.max_positions} positions - cannot add new position")
                     return
                 else:
                     logger.info(f"❌ POSITION SIZE LIMIT: Even minimum size ${initial_position_size * 0.1:.2f} exceeds limits")
                     return
-        
+
         logger.info(f"✅ POSITION LIMITS OK FOR IMMEDIATE TRADE: ${initial_position_size:.2f}")
-        
+
         # Check if we already have an open position in this market with the same side
         # Use the same logic as unified trading system to be consistent
         side = "NO" if opportunity.edge < 0 else "YES"  # Determine side based on edge direction
@@ -1316,76 +1456,107 @@ async def _evaluate_immediate_trade(
         if existing_position:
             logger.info(f"⏭️ Skipping immediate trade for {opportunity.market_id} {side} - position already exists")
             return
-        
+
         # 🚀 STRONG OPPORTUNITY - TRADE IMMEDIATELY!
         logger.info(f"🚀 POTENTIAL IMMEDIATE TRADE: {opportunity.market_id} - Edge: {opportunity.edge:.1%}, Confidence: {opportunity.confidence:.1%}")
-        
+
         # Verify with Deep Research before pulling the trigger
         # This prevents "fast" but wrong decisions on high-stakes trades
         logger.info(f"🕵️ Running DEEP RESEARCH verification for {opportunity.market_id}...")
-        
-        verification_passed, verif_reason = await _verify_with_deep_research(
+
+        verification_passed, verif_reason, ai_decision = await _verify_with_deep_research(
             opportunity, db_manager, kalshi_client, xai_client
         )
-        
+
         if not verification_passed:
             logger.info(f"🛑 Deep research REJECTED trade for {opportunity.market_id}: {verif_reason}")
             return
-            
+
         logger.info(f"✅ Deep research APPROVED trade for {opportunity.market_id}: {verif_reason}")
 
         # Use the position size that was already calculated and validated above
         position_size = initial_position_size
-        
+
         logger.info(f"💰 Using validated position size: ${position_size:.2f}")
-        
+
         # Final cash reserves check with actual calculated size
         from src.utils.cash_reserves import check_can_trade_with_cash_reserves
-        
+
         can_trade_reserves, reserves_reason = await check_can_trade_with_cash_reserves(
             position_size, db_manager, kalshi_client
         )
-        
+
         if not can_trade_reserves:
             logger.info(f"❌ CASH RESERVES CHECK FAILED: {opportunity.market_id} - {reserves_reason}")
             return
-        
+
         logger.info(f"✅ CASH RESERVES APPROVED: ${position_size:.2f} - {reserves_reason}")
-        
+
         # NO DOLLAR MINIMUM - we'll ensure at least 1 contract below
         # Note: side was already determined above
-        
+
         # Calculate proper entry price (what we expect to pay)
         if side == "YES":
             entry_price = opportunity.market_probability  # Price for YES shares
             shares = max(1, int(position_size / entry_price))  # Minimum 1 contract
         else:
-            entry_price = 1 - opportunity.market_probability  # Price for NO shares  
+            entry_price = 1 - opportunity.market_probability  # Price for NO shares
             shares = max(1, int(position_size / entry_price))  # Minimum 1 contract
-        
+
         # Verify we can afford at least 1 contract
         min_cost = shares * entry_price
         if min_cost > available_cash:
             logger.info(f"⏭️ Cannot afford minimum 1 contract: ${min_cost:.2f} > ${available_cash:.2f}")
             return
-            
+
         logger.info(f"📊 Trade details: {shares} {side} shares @ ${entry_price:.2f} = ${min_cost:.2f}")
-        
-        # Calculate proper stop-loss levels using Grok4 recommendations
+
+        # Calculate stop-loss levels: Use AI-recommended if available, otherwise use StopLossCalculator
         from src.utils.stop_loss_calculator import StopLossCalculator
-        
-        exit_levels = StopLossCalculator.calculate_stop_loss_levels(
-            entry_price=entry_price,
-            side=side,
-            confidence=opportunity.confidence,
-            market_volatility=opportunity.volatility,
-            time_to_expiry_days=opportunity.time_to_expiry
-        )
-        
+
+        # Check if AI provided stop loss and take profit recommendations
+        ai_stop_loss = None
+        ai_take_profit = None
+        if ai_decision:
+            ai_stop_loss = getattr(ai_decision, 'stop_loss_cents', None)
+            ai_take_profit = getattr(ai_decision, 'take_profit_cents', None)
+
+        # Validate AI-recommended values for safety and reasonableness
+        if ai_stop_loss and ai_take_profit:
+            # Security validation for AI output
+            if validate_ai_exit_levels(ai_stop_loss, ai_take_profit, entry_price, side, logger):
+                # Use AI-recommended levels (convert cents to decimal)
+                stop_loss_price = ai_stop_loss / 100
+                take_profit_price = ai_take_profit / 100
+                logger.info(f"🎯 Using AI-recommended exit levels: SL={stop_loss_price:.2f}, TP={take_profit_price:.2f}")
+
+                # Use settings for max hold hours
+                exit_levels = {
+                    'stop_loss_price': stop_loss_price,
+                    'take_profit_price': take_profit_price,
+                    'max_hold_hours': settings.trading.max_hold_time_hours,
+                    'stop_loss_pct': abs(entry_price - stop_loss_price) / entry_price * 100 if entry_price > 0 else 10,
+                    'target_confidence_change': settings.trading.confidence_decay_threshold
+                }
+            else:
+                logger.warning("🚨 AI-recommended SL/TP failed validation - using safe defaults")
+                ai_stop_loss = None
+                ai_take_profit = None
+        else:
+            # Fall back to StopLossCalculator defaults
+            logger.info("📊 Using StopLossCalculator defaults (AI didn't provide SL/TP)")
+            exit_levels = StopLossCalculator.calculate_stop_loss_levels(
+                entry_price=entry_price,
+                side=side,
+                confidence=opportunity.confidence,
+                market_volatility=opportunity.volatility,
+                time_to_expiry_days=opportunity.time_to_expiry
+            )
+
         # Create position directly
         from src.utils.database import Position
         from src.jobs.execute import execute_position
-        
+
         position = Position(
             market_id=opportunity.market_id,
             side=side,
@@ -1393,56 +1564,56 @@ async def _evaluate_immediate_trade(
             entry_price=entry_price,
             live=False,  # Will be set to True ONLY after successful execution
             timestamp=datetime.now(),
-            rationale=f"IMMEDIATE TRADE: Edge={opportunity.edge:.1%}, Conf={opportunity.confidence:.1%}, Kelly={kelly_fraction:.1%}, Stop={exit_levels['stop_loss_pct']}% | Deep Research: {verif_reason}",
+            rationale=f"IMMEDIATE TRADE: Edge={opportunity.edge:.1%}, Conf={opportunity.confidence:.1%}, Kelly={kelly_fraction:.1%}, Stop={exit_levels.get('stop_loss_pct', 10):.1f}% | Deep Research: {verif_reason}",
             strategy="immediate_portfolio_optimization",
-            
-            # Enhanced exit strategy using Grok4 recommendations
+
+            # Enhanced exit strategy using AI or Grok4 recommendations
             stop_loss_price=exit_levels['stop_loss_price'],
             take_profit_price=exit_levels['take_profit_price'],
             max_hold_hours=exit_levels['max_hold_hours'],
-            target_confidence_change=exit_levels['target_confidence_change']
+            target_confidence_change=exit_levels.get('target_confidence_change', settings.trading.confidence_decay_threshold)
         )
-        
+
         # 🚨 VALIDATE MARKET IS STILL TRADEABLE before executing
         try:
             market_data = await kalshi_client.get_market(opportunity.market_id)
-            
+
             # FIXED: Extract from nested 'market' object in API response
             market_info = market_data.get('market', {})
             market_status = market_info.get('status')
             yes_ask = market_info.get('yes_ask', 0)
             no_ask = market_info.get('no_ask', 0)
-            
+
             logger.info(f"🔍 Market validation for {opportunity.market_id}: status={market_status}, YES={yes_ask}¢, NO={no_ask}¢")
-            
+
             # FIXED: Kalshi uses 'active' for tradeable markets, not 'open'
             if market_status not in ['active', 'open']:
                 logger.warning(f"⏭️ Skipping {opportunity.market_id} - Market status: {market_status} (not active/open)")
                 return
-            
+
             if not (yes_ask and no_ask and yes_ask > 0 and no_ask > 0):
                 logger.warning(f"⏭️ Skipping {opportunity.market_id} - No valid prices (YES={yes_ask}¢, NO={no_ask}¢)")
                 return
-                
+
             logger.info(f"✅ Market validation passed for {opportunity.market_id} - Status: {market_status}, proceeding with trade!")
-            
+
         except Exception as e:
             logger.error(f"⏭️ Skipping {opportunity.market_id} - Market validation failed: {e}")
             import traceback
             logger.error(f"Full error: {traceback.format_exc()}")
             return
-        
+
         # Execute immediately
         position_id = await db_manager.add_position(position)
         if position_id:
             # Set the position ID so execute_position can update the database
             position.id = position_id
-            
+
             # Execute the trade with edge for smart order type selection
             success = await execute_position(
-                position, 
-                True, 
-                db_manager, 
+                position,
+                True,
+                db_manager,
                 kalshi_client,
                 edge=getattr(opportunity, 'edge', 0.0)  # Pass edge for IOC order selection
             )
@@ -1450,7 +1621,7 @@ async def _evaluate_immediate_trade(
                 logger.info(f"✅ IMMEDIATE TRADE EXECUTED: {opportunity.market_id} - ${position_size:.0f} position")
             else:
                 logger.error(f"❌ IMMEDIATE TRADE FAILED: {opportunity.market_id}")
-        
+
     except Exception as e:
         logger.error(f"Error in immediate trade evaluation for {opportunity.market_id}: {e}")
 
@@ -1458,16 +1629,17 @@ async def _verify_with_deep_research(
     opportunity: MarketOpportunity,
     db_manager: DatabaseManager,
     kalshi_client: KalshiClient,
-    xai_client: XAIClient
-) -> Tuple[bool, str]:
+    xai_client: Union[XAIClient, EnhancedAIClient],
+    ensemble_coordinator: Optional[EnsembleCoordinator] = None
+) -> Tuple[bool, str, Optional[Any]]:
     """
     Perform a deep research verification for a potential trade.
-    Returns (approved, reason).
+    Returns (approved, reason, decision) where decision contains AI-recommended SL/TP.
     """
     try:
         # 1. Fetch full market details including recent news/activity if possible
         # For now we use what we have in opportunity, but properly formatted
-        
+
         market_data = {
             'title': opportunity.market_title,
             'yes_price': int(opportunity.market_probability * 100),  # approx
@@ -1476,60 +1648,143 @@ async def _verify_with_deep_research(
             'days_to_expiry': opportunity.time_to_expiry,
             # 'rules': ... # We'd ideally want rules here
         }
-        
+
         # 2. Get AI decision with FULL reasoning (not simplified)
         # We pass empty portfolio data as we just want an opinion on the trade itself
         portfolio_data = {
             'cash': 10000,   # Dummy values for independent assessment
             'balance': 10000
         }
-        
+
         # Use existing news summary if we have it, or empty
-        news_summary = "" 
-        
-        decision = await xai_client.get_trading_decision(
-            market_data, 
-            portfolio_data, 
-            news_summary,
-            ml_prediction=None # Avoid biasing with same ML pred if possible, or pass it if trusted
-        )
-        
+        news_summary = ""
+
+        decision = None
+
+        decision = None
+
+        # 1.5. CHECK ENSEMBLE COORDINATOR (Highest Priority)
+        # If we have the ensemble coordinator, use it to get a multi-model consensus
+        if ensemble_coordinator and settings.trading.enable_ensemble_mode:
+            try:
+                logging.getLogger("deep_research").info(f"🧠 Requesting ENSEMBLE decision for {opportunity.market_id}...")
+                ensemble_decision = await ensemble_coordinator.get_ensemble_decision(
+                    market_data=market_data,
+                    portfolio_data=portfolio_data,
+                    news_summary=news_summary
+                )
+
+                if ensemble_decision and ensemble_decision.action == "BUY":
+                    logging.getLogger("deep_research").info(f"✅ ENSEMBLE APPROVED: {ensemble_decision.side} ({ensemble_decision.confidence:.1%})")
+
+                    # Convert to TradingDecision format if needed or just use it
+                    # The ensemble decision structure is compatible or we can wrap it
+                    from src.clients.xai_client import TradingDecision
+                    decision = TradingDecision(
+                        action=ensemble_decision.action,
+                        side=ensemble_decision.side,
+                        confidence=ensemble_decision.confidence,
+                        limit_price=None,
+                        reasoning=f"Ensemble Consensus ({ensemble_decision.vote_breakdown}): {ensemble_decision.reasoning}",
+                        stop_loss_cents=getattr(ensemble_decision, 'stop_loss_cents', None),
+                        take_profit_cents=getattr(ensemble_decision, 'take_profit_cents', None)
+                    )
+                else:
+                    logging.getLogger("deep_research").warning(f"Ensemble Result: {ensemble_decision.action if ensemble_decision else 'None'}. Falling back/Skipping.")
+
+            except Exception as e:
+                logging.getLogger("deep_research").error(f"Failed to use Ensemble Coordinator: {e}")
+
+        # Check if Dual AI is enabled (secondary check if Ensemble not used/failed)
+        if not decision and settings.trading.enable_dual_ai_mode:
+            try:
+                from src.intelligence.dual_ai_engine import DualAIDecisionEngine
+                from src.clients.openai_client import OpenAIClient
+
+                openai_client = None
+                if settings.api.openai_api_key:
+                    openai_client = OpenAIClient(api_key=settings.api.openai_api_key)
+
+                if openai_client:
+                    dual_engine = DualAIDecisionEngine(
+                        xai_client=xai_client,
+                        openai_client=openai_client,
+                        db_manager=db_manager,
+                        kalshi_client=kalshi_client
+                    )
+
+                    logging.getLogger("deep_research").info(f"🕵️ Using Dual AI Engine (Grok+GPT) for deep research on {opportunity.market_id}")
+
+                    dual_result = await dual_engine.get_dual_ai_decision(
+                        market_data,
+                        portfolio_data,
+                        news_summary
+                    )
+
+                    if dual_result and dual_result.final_action == "BUY":
+                        # Construct TradingDecision from DualAIDecision fields
+                        # note: DualAIDecision stores result in flat fields (final_action, final_side, etc.)
+                        from src.clients.xai_client import TradingDecision # Ensure import
+
+                        decision = TradingDecision(
+                            action=dual_result.final_action,
+                            side=dual_result.final_side,
+                            confidence=dual_result.final_confidence,
+                            limit_price=None,
+                            reasoning=dual_result.dual_ai_reasoning
+                        )
+                        logging.getLogger("deep_research").info(f"✅ Dual AI Consensus: {decision.action} {decision.side} ({decision.confidence:.1%})")
+                    else:
+                        logging.getLogger("deep_research").warning(f"Dual AI Result: {dual_result.final_action if dual_result else 'None'}. Falling back/Skipping.")
+
+            except Exception as e:
+                logging.getLogger("deep_research").error(f"Failed to use Dual AI: {e}")
+
+        # Fallback to standard XAI client if Dual AI disabled, failed, or skipped
+        if not decision:
+            decision = await xai_client.get_trading_decision(
+                market_data,
+                portfolio_data,
+                news_summary,
+                ml_prediction=None # Avoid biasing with same ML pred if possible, or pass it if trusted
+            )
+
         if not decision:
             # AI unavailable (rate limit, cost limit, etc.) - allow trade to proceed
             # The initial fast analysis already passed, so we trust that decision
             logging.getLogger("deep_research").warning(
                 f"Deep research unavailable for {opportunity.market_id} - proceeding with initial analysis"
             )
-            return True, "Deep research unavailable - proceeding with initial edge analysis"
-            
+            return True, "Deep research unavailable - proceeding with initial edge analysis", None
+
         # 3. Compare with our opportunistic decision
         intended_side = "NO" if opportunity.edge < 0 else "YES"
-        
+
         if decision.action != "BUY":
-            return False, f"Deep research recommends {decision.action} instead of BUY"
-            
+            return False, f"Deep research recommends {decision.action} instead of BUY", decision
+
         if decision.side != intended_side:
-            return False, f"Deep research recommends {decision.side}, but we wanted {intended_side}"
-            
+            return False, f"Deep research recommends {decision.side}, but we wanted {intended_side}", decision
+
         if decision.confidence < 0.6: # High bar for confirmation
-            return False, f"Deep research confidence {decision.confidence:.1%} too low (<60%)"
-            
+            return False, f"Deep research confidence {decision.confidence:.1%} too low (<60%)", decision
+
         # 4. Special Check: 99% Probability Trap
         # If AI says BUY YES at 99c, it better be 100% sure.
         if intended_side == "YES" and opportunity.market_probability > 0.95:
-             if decision.confidence < 0.95:
-                 return False, f"Buying {intended_side} at >95% prob requires >95% confidence (got {decision.confidence:.1%})"
-                 
-        if intended_side == "NO" and opportunity.market_probability < 0.05:
-             # Selling NO at 5c is buying NO at 95%
-             if decision.confidence < 0.95:
-                 return False, f"Buying {intended_side} (short YES) at \u003c5% prob requires >95% confidence (got {decision.confidence:.1%})"
+            if decision.confidence < 0.95:
+                return False, f"Buying {intended_side} at >95% prob requires >95% confidence (got {decision.confidence:.1%})", decision
 
-        return True, f"Confirmed {intended_side} with {decision.confidence:.1%} confidence. Reasoning: {decision.reasoning[:100]}..."
-        
+        if intended_side == "NO" and opportunity.market_probability < 0.05:
+            # Selling NO at 5c is buying NO at 95%
+            if decision.confidence < 0.95:
+                return False, f"Buying {intended_side} (short YES) at \u003c5% prob requires >95% confidence (got {decision.confidence:.1%})", decision
+
+        return True, f"Confirmed {intended_side} with {decision.confidence:.1%} confidence. Reasoning: {decision.reasoning[:100]}...", decision
+
     except Exception as e:
         logging.getLogger("deep_research").error(f"Error in deep research: {e}")
-        return False, f"Deep research error: {str(e)}"
+        return False, f"Deep research error: {str(e)}", None
 
 def _calculate_simple_kelly(opportunity: MarketOpportunity) -> float:
     """Calculate simple Kelly fraction for immediate trading."""
@@ -1541,13 +1796,13 @@ def _calculate_simple_kelly(opportunity: MarketOpportunity) -> float:
             q = 1 - p
             b = (1 - opportunity.market_probability) / opportunity.market_probability
         else:  # Betting NO
-            p = 1 - opportunity.predicted_probability  
+            p = 1 - opportunity.predicted_probability
             q = opportunity.predicted_probability
             b = opportunity.market_probability / (1 - opportunity.market_probability)
-        
+
         kelly = (b * p - q) / b
         return max(0, min(kelly, 0.2))  # Cap at 20%
-        
+
     except:
         return 0.05  # Default 5% allocation
 
@@ -1566,39 +1821,39 @@ async def _get_fast_ai_prediction(
         # Create a simplified prompt for faster analysis
         prompt = f"""
         QUICK PREDICTION REQUEST
-        
+
         Market: {market.title}
         Current YES price: {market_price:.2f}
-        
+
         {xai_client.ml_predictor.format_for_prompt(ml_prediction) if ml_prediction else ""}
-        
+
         Provide a FAST prediction in JSON format:
         {{
             "probability": [0.0-1.0],
             "confidence": [0.0-1.0],
             "reasoning": "brief 1-2 sentence explanation"
         }}
-        
+
         Focus on: probability estimate and your confidence level.
         """
-        
-        # Use AI analysis for portfolio optimization - higher tokens for reasoning models  
+
+        # Use AI analysis for portfolio optimization - higher tokens for reasoning models
         response_text = await xai_client.get_completion(
             prompt,
-            max_tokens=3000,  # Higher for reasoning models like grok-4
+            max_tokens=settings.trading.ai_max_tokens,  # Use settings value
             temperature=0.1   # Low temperature for consistency
         )
-        
+
         # Check if AI response is None (API exhausted or failed)
         if response_text is None:
             logging.getLogger("portfolio_opportunities").info(f"AI analysis unavailable for {market.market_id} due to API limits")
             return None, None
-        
+
         # Parse JSON from the response text
         try:
             import json
             import re
-            
+
             # Try to extract JSON from the response
             json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
             if json_match:
@@ -1607,22 +1862,22 @@ async def _get_fast_ai_prediction(
             else:
                 # If no JSON found, try to parse the entire response
                 response = json.loads(response_text)
-            
+
             if response and isinstance(response, dict):
                 probability = response.get('probability')
                 confidence = response.get('confidence')
-                
+
                 # Validate values
                 if (isinstance(probability, (int, float)) and 0 <= probability <= 1 and
                     isinstance(confidence, (int, float)) and 0 <= confidence <= 1):
                     return float(probability), float(confidence)
-            
+
         except (json.JSONDecodeError, ValueError) as json_error:
             logging.getLogger("portfolio_opportunities").warning(f"Failed to parse JSON from AI response for {market.market_id}: {json_error}")
             logging.getLogger("portfolio_opportunities").debug(f"Raw response: {response_text}")
-        
+
         return None, None
-        
+
     except Exception as e:
         logging.getLogger("portfolio_opportunities").error(f"Error in fast AI prediction for {market.market_id}: {e}")
         return None, None
@@ -1637,11 +1892,11 @@ async def run_portfolio_optimization(
     Main entry point for portfolio optimization.
     """
     logger = get_trading_logger("portfolio_optimization_main")
-    
+
     try:
         # Initialize optimizer
         optimizer = AdvancedPortfolioOptimizer(db_manager, kalshi_client, xai_client)
-        
+
         # Get markets
         markets = await db_manager.get_eligible_markets(
             volume_min=20000,  # Balanced volume for actual trading opportunities
@@ -1650,29 +1905,29 @@ async def run_portfolio_optimization(
         if not markets:
             logger.warning("No eligible markets for portfolio optimization")
             return optimizer._empty_allocation()
-        
+
         # Convert to opportunities (no immediate trading in batch mode)
         opportunities = await create_market_opportunities_from_markets(
             markets, xai_client, kalshi_client, None, 0
         )
-        
+
         if not opportunities:
             logger.warning("No valid opportunities for portfolio optimization")
             return optimizer._empty_allocation()
-        
+
         logger.info(f"Running portfolio optimization on {len(opportunities)} opportunities")
-        
+
         # Optimize portfolio
         allocation = await optimizer.optimize_portfolio(opportunities)
-        
+
         logger.info(
             f"Portfolio optimization complete: "
             f"{len(allocation.allocations)} positions, "
             f"${allocation.total_capital_used:.0f} allocated"
         )
-        
+
         return allocation
-        
+
     except Exception as e:
         logger.error(f"Error in portfolio optimization: {e}")
-        return AdvancedPortfolioOptimizer(db_manager, kalshi_client, xai_client)._empty_allocation() 
+        return AdvancedPortfolioOptimizer(db_manager, kalshi_client, xai_client)._empty_allocation()

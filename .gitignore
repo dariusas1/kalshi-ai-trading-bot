@@ -210,3 +210,5 @@ secrets.yaml
 .claude-flow/metrics/
 .claude-flow/sessions/
 .claude-flow/state/ 
+.swam/
+.claude-flow/metrics/

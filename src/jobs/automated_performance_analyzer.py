@@ -26,7 +26,7 @@ from src.clients.xai_client import XAIClient
 from src.utils.database import DatabaseManager, Position, TradeLog
 from src.config.settings import settings
 from src.utils.logging_setup import get_trading_logger
-from xai_sdk.chat import user as xai_user
+
 
 
 class Priority(Enum):
@@ -176,14 +176,96 @@ class AutomatedPerformanceAnalyzer:
         kalshi_positions = positions_response.get('market_positions', [])
         active_positions = [p for p in kalshi_positions if p.get('position', 0) != 0]
         
+        # Calculate precise portfolio value using real market prices
+        total_position_value = 0.0
+        
+        if active_positions:
+            try:
+                # Fetch individual market data for each position to get live prices
+                # Using get_market(ticker) instead of batch get_markets which may not return prices correctly
+                markets_map = {}
+                for position in active_positions:
+                    ticker = position['ticker']
+                    try:
+                        market_response = await self.kalshi_client.get_market(ticker)
+                        # get_market returns the market directly, not wrapped in 'markets' array
+                        market_data = market_response.get('market', market_response)
+                        if market_data:
+                            markets_map[ticker] = market_data
+                    except Exception as e:
+                        self.logger.debug(f"Failed to fetch market {ticker}: {e}")
+                
+                # Calculate value
+                for position in active_positions:
+                    ticker = position['ticker']
+                    count = abs(position.get('position', 0))
+                    market = markets_map.get(ticker)
+                    val = 0.0
+                    
+                    if market:
+                        # Kalshi API uses these fields for prices (in cents):
+                        # - last_price: Last traded price
+                        # - previous_yes_ask / previous_yes_bid: Previous Yes prices
+                        # - no_ask / no_bid: Current No prices
+                        
+                        # Get the best available price based on position direction
+                        if position.get('position', 0) > 0:
+                            # Long Yes position - use last_price or mid of previous yes bid/ask
+                            live_price = market.get('last_price')
+                            if live_price is None:
+                                yes_bid = market.get('previous_yes_bid')
+                                yes_ask = market.get('previous_yes_ask')
+                                if yes_bid is not None and yes_ask is not None:
+                                    live_price = (yes_bid + yes_ask) / 2
+                        else:
+                            # Short Yes / Long No position - use no price
+                            no_bid = market.get('no_bid')
+                            no_ask = market.get('no_ask')
+                            if no_bid is not None and no_ask is not None:
+                                live_price = (no_bid + no_ask) / 2
+                            else:
+                                # Fallback: no price = 100 - yes price
+                                last_price = market.get('last_price')
+                                live_price = 100 - last_price if last_price is not None else None
+                            
+                        if live_price is not None:
+                            val = (count * live_price) / 100.0
+                            self.logger.debug(f"Valuation {ticker}: {count} @ {live_price}c = ${val:.2f} (Live)")
+                        else:
+                            # Fallback to market exposure if live price missing
+                            exposure = position.get('market_exposure', 0) / 100.0
+                            val = exposure
+                            self.logger.warning(f"Valuation {ticker}: Live price missing, using exposure ${val:.2f}")
+                    else:
+                        # Fallback to market exposure if market data missing
+                        exposure = position.get('market_exposure', 0) / 100.0
+                        val = exposure
+                        self.logger.warning(f"Valuation {ticker}: Market not found, using exposure ${val:.2f}")
+                        
+                    total_position_value += val
+                        
+            except Exception as e:
+                self.logger.error(f"Error calculating precise portfolio value: {e}")
+                # Fallback to market exposure sum
+                total_position_value = sum(p.get('market_exposure', 0) for p in active_positions) / 100.0
+        
+        available_cash = balance_response.get('balance', 0) / 100
+        total_p_value = available_cash + total_position_value
+        
+        self.logger.info(
+            "Portfolio Valuation", 
+            cash=available_cash, 
+            positions_value=total_position_value, 
+            total=total_p_value,
+            active_count=len(active_positions)
+        )
+        
         return {
             'active_positions': len(active_positions),
             'total_contracts': sum(abs(p.get('position', 0)) for p in active_positions),
-            'available_cash': balance_response.get('balance', 0) / 100,
+            'available_cash': available_cash,
             'positions_detail': active_positions,
-            'total_portfolio_value': balance_response.get('balance', 0) / 100 + sum(
-                abs(p.get('position', 0)) * 0.50 for p in active_positions  # Rough position valuation
-            )
+            'total_portfolio_value': total_p_value
         }
     
     async def _calculate_performance_metrics(self) -> PerformanceMetrics:
@@ -396,42 +478,77 @@ class AutomatedPerformanceAnalyzer:
         
         # Prepare analysis prompt with current state
         analysis_prompt = f"""
-You are an expert quantitative trading analyst. Analyze this Kalshi prediction market trading system:
+You are an expert quantitative trading analyst. Analyze this Kalshi prediction market trading system with a focus on calibration and bias detection.
 
-        **IMPORTANT DATA LIMITATION**: The trade_logs database only contains recent data from {getattr(self, 'trade_date_range', {}).get('earliest', 'today')} to {getattr(self, 'trade_date_range', {}).get('latest', 'today')}. Historical profitable manual trades are NOT included in this analysis.
+---
+## IMPORTANT DATA LIMITATION
 
-**CURRENT PORTFOLIO STATE:**
-- Active Positions: {portfolio_data['active_positions']}
-- Available Cash: ${metrics.available_cash:.2f}
-- Capital Utilization: {metrics.capital_utilization:.1f}%
-- Total Portfolio Value: ${portfolio_data['total_portfolio_value']:.2f}
+The trade_logs database only contains data from {getattr(self, 'trade_date_range', {}).get('earliest', 'today')} to {getattr(self, 'trade_date_range', {}).get('latest', 'today')}. Historical profitable manual trades may NOT be included.
 
-**RECENT PERFORMANCE METRICS (LIMITED DATA):**
-- Total Recorded Trades: {metrics.total_trades} (recent data only)
-- Manual Trades: {metrics.manual_trades} (Win Rate: {metrics.manual_win_rate:.1%})
-- Automated Trades: {metrics.automated_trades} (Win Rate: {metrics.automated_win_rate:.1%})
-- Overall Win Rate: {metrics.overall_win_rate:.1%} (WARNING: Based on incomplete data)
-- Total P&L: ${metrics.total_pnl:.2f} (recent trades only)
+---
+## CURRENT PORTFOLIO STATE
 
-**RISK CHECK RESULTS:**
+- **Active Positions:** {portfolio_data['active_positions']}
+- **Available Cash:** ${metrics.available_cash:.2f}
+- **Capital Utilization:** {metrics.capital_utilization:.1f}%
+- **Total Portfolio Value:** ${portfolio_data['total_portfolio_value']:.2f}
+
+---
+## RECENT PERFORMANCE METRICS (LIMITED DATA)
+
+- **Total Recorded Trades:** {metrics.total_trades} (recent data only)
+- **Manual Trades:** {metrics.manual_trades} (Win Rate: {metrics.manual_win_rate:.1%})
+- **Automated Trades:** {metrics.automated_trades} (Win Rate: {metrics.automated_win_rate:.1%})
+- **Overall Win Rate:** {metrics.overall_win_rate:.1%} (WARNING: Based on potentially incomplete data)
+- **Total P&L:** ${metrics.total_pnl:.2f} (recent trades only)
+
+---
+## RISK CHECK RESULTS
+
 {self._format_risk_checks_for_prompt(risk_checks)}
 
-**ANALYSIS REQUEST:**
-Provide a focused analysis on:
-1. Most critical issues requiring immediate action
-2. Performance trends (manual vs automated)
-3. Specific optimization recommendations
-4. Risk mitigation priorities
+---
+## ANALYSIS FRAMEWORK
 
-Be concise and actionable. Focus on the top 3 priorities.
+### 1. EDGE CALIBRATION REVIEW
+- Are predicted "edges" actually resulting in profits?
+- What is the actual hit rate on trades with stated edge?
+- Is "edge" being found where none exists?
+- **Specific:** At what confidence level do trades become profitable?
+
+### 2. COGNITIVE BIAS PATTERN ANALYSIS
+Review trade history for evidence of:
+- **Confirmation bias:** Were we cherry-picking evidence?
+- **Overconfidence:** Did we trade when edge was unclear?
+- **Recency bias:** Did we overweight recent events?
+- **Anchoring:** Were we stuck on initial price levels?
+
+### 3. CRITICAL ISSUES REQUIRING ACTION
+What needs to be fixed immediately?
+
+### 4. PERFORMANCE TRENDS
+- Manual vs automated: What can we learn from the gap?
+- Which market types are winners/losers?
+
+### 5. PROMPT/STRATEGY IMPROVEMENTS
+Based on this analysis, what specific changes should be made to:
+- The AI prompts (to reduce biases)?
+- The edge detection thresholds?
+- The market selection criteria?
+
+---
+## OUTPUT FORMAT
+
+Be CONCISE and ACTIONABLE. Focus on top 3 priorities.
+End with a numbered list of SPECIFIC CHANGES TO IMPLEMENT.
 """
 
         try:
             # Use raw completion to get unprocessed text
-            messages = [xai_user(analysis_prompt)]
+            messages = [{"role": "user", "content": analysis_prompt}]
             response_content, cost = await self.xai_client._make_completion_request(
                 messages, 
-                max_tokens=3000,
+                max_tokens=settings.trading.ai_max_tokens,
                 temperature=0.3
             )
             

@@ -5,14 +5,17 @@ Trading decision job - analyzes markets and generates trading decisions.
 import asyncio
 import time
 import numpy as np
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Union
 from datetime import datetime
 
 from src.utils.database import DatabaseManager, Market, Position
 from src.config.settings import settings
 from src.utils.logging_setup import get_trading_logger
 from src.clients.xai_client import XAIClient
+from src.intelligence.enhanced_client import EnhancedAIClient
 from src.clients.kalshi_client import KalshiClient
+from src.utils.validation import MarketDataValidator, RiskValidator
+from src.exceptions.trading import ValidationError, XAIError, DatabaseError
 
 logger = get_trading_logger("decision_helpers")
 
@@ -62,7 +65,7 @@ def _calculate_dynamic_quantity(
 async def make_decision_for_market(
     market: Market,
     db_manager: DatabaseManager,
-    xai_client: XAIClient,
+    xai_client: Union[XAIClient, EnhancedAIClient],
     kalshi_client: KalshiClient,
 ) -> Optional[Position]:
     """
@@ -73,6 +76,37 @@ async def make_decision_for_market(
     logger.info(f"Analyzing market: {market.title} ({market.market_id})")
 
     try:
+        # Validate input parameters
+        if market is None:
+            raise ValidationError("Market cannot be None")
+
+        if db_manager is None:
+            raise ValidationError("Database manager cannot be None")
+
+        if xai_client is None:
+            raise ValidationError("xAI client cannot be None")
+
+        if kalshi_client is None:
+            raise ValidationError("Kalshi client cannot be None")
+
+        # Validate market data structure
+        try:
+            # Convert Market object to dict for validation
+            market_data = {
+                'market_id': market.market_id,
+                'title': market.title,
+                'yes_price': market.yes_price,
+                'no_price': market.no_price,
+                'volume': market.volume,
+                'close_time': market.close_time,
+                'settlement_time': market.settlement_time,
+                'active': market.active,
+                'category': market.category
+            }
+            MarketDataValidator.validate_market_data(market_data)
+        except ValidationError as e:
+            logger.error(f"Invalid market data for {market.market_id}: {e}")
+            return None
         # CHECK 1: Daily budget enforcement
         daily_cost = await db_manager.get_daily_ai_cost()
         daily_limit = settings.get_ai_daily_limit()
@@ -182,6 +216,7 @@ async def make_decision_for_market(
                         # Determine correct entry price based on side
                         entry_price = market.yes_price if decision.side == "YES" else market.no_price
                         
+                        # Use SL/TP from TradingDecision if available, otherwise use calculated exit strategy
                         position = Position(
                             market_id=market.market_id,
                             side=decision.side,
@@ -192,10 +227,10 @@ async def make_decision_for_market(
                             confidence=decision.confidence,
                             live=False,
                             strategy="directional_trading",
-                            
-                            # Enhanced exit strategy fields using Grok4 recommendations
-                            stop_loss_price=exit_strategy['stop_loss_price'],
-                            take_profit_price=exit_strategy['take_profit_price'],
+
+                            # Enhanced exit strategy fields - prioritize TradingDecision SL/TP
+                            stop_loss_price=decision.stop_loss_cents / 100 if decision.stop_loss_cents else exit_strategy['stop_loss_price'],
+                            take_profit_price=decision.take_profit_cents / 100 if decision.take_profit_cents else exit_strategy['take_profit_price'],
                             max_hold_hours=exit_strategy['max_hold_hours'],
                             target_confidence_change=exit_strategy['target_confidence_change']
                         )
@@ -227,20 +262,27 @@ async def make_decision_for_market(
             news_summary = f"Low volume market ({market.volume}). Analysis based on market data only."
             estimated_search_cost = 0.0
         else:
-            # Use optimized search with timeout and fallback
-            try:
-                news_summary = await asyncio.wait_for(
-                    xai_client.search(market.title, max_length=200),
-                    timeout=15.0
-                )
-                estimated_search_cost = 0.02  # Rough estimate for search cost
-            except asyncio.TimeoutError:
-                logger.warning(f"Search timeout for market {market.market_id}, using fallback")
-                news_summary = f"Search timeout. Analyzing {market.title} based on market data only."
-                estimated_search_cost = 0.0
-            except Exception as e:
-                logger.warning(f"Search failed for market {market.market_id}, continuing without news", error=str(e))
-                news_summary = f"News search unavailable. Analysis based on market data only."
+            # Check if client supports search functionality (only XAIClient has search)
+            if hasattr(xai_client, 'search'):
+                # Use optimized search with timeout and fallback
+                try:
+                    news_summary = await asyncio.wait_for(
+                        xai_client.search(market.title, max_length=200),  # type: ignore
+                        timeout=15.0
+                    )
+                    estimated_search_cost = 0.02  # Rough estimate for search cost
+                except asyncio.TimeoutError:
+                    logger.warning(f"Search timeout for market {market.market_id}, using fallback")
+                    news_summary = f"Search timeout. Analyzing {market.title} based on market data only."
+                    estimated_search_cost = 0.0
+                except Exception as e:
+                    logger.warning(f"Search failed for market {market.market_id}, continuing without news", error=str(e))
+                    news_summary = f"News search unavailable. Analysis based on market data only."
+                    estimated_search_cost = 0.0
+            else:
+                # Client doesn't support search (likely EnhancedAIClient)
+                logger.info(f"Client does not support search functionality for market {market.market_id}")
+                news_summary = f"Search unavailable for this client. Analysis based on market data only."
                 estimated_search_cost = 0.0
 
         total_analysis_cost += estimated_search_cost
@@ -263,58 +305,146 @@ async def make_decision_for_market(
         max_investment_possible = (available_balance * settings.trading.max_position_size_pct) / 100
         is_high_stakes = max_investment_possible >= settings.trading.ensemble_cascading_medium_value_threshold
 
-        # Enhanced ensemble decision logic with confidence and uncertainty handling
-        if settings.multi_model_ensemble and is_high_stakes:
-            logger.info(f"Using enhanced multi-model ensemble for high-stakes market (max potential: ${max_investment_possible:.2f})")
-
-            # Try advanced ensemble first, fall back to basic ensemble if needed
+        # === DUAL-AI MODE: Grok Forecaster + GPT Critic ===
+        # Use dual-AI for higher quality decisions when enabled
+        use_dual_ai = (
+            settings.trading.enable_dual_ai_mode and
+            max_investment_possible >= settings.trading.dual_ai_min_trade_value and
+            (not settings.trading.dual_ai_use_for_high_stakes_only or is_high_stakes)
+        )
+        
+        decision = None
+        
+        if use_dual_ai:
+            logger.info(f"🔮 [DUAL-AI] Using Grok Forecaster + GPT Critic for {market.market_id}")
+            
             try:
-                decision = await xai_client.get_advanced_ensemble_decision(
+                from src.intelligence.dual_ai_engine import DualAIDecisionEngine
+                from src.clients.openai_client import OpenAIClient
+                from src.clients.xai_client import TradingDecision
+                
+                # Initialize dual-AI engine
+                openai_client = OpenAIClient()
+                dual_engine = DualAIDecisionEngine(
+                    xai_client=xai_client,
+                    openai_client=openai_client,
+                    db_manager=db_manager,
+                    kalshi_client=kalshi_client
+                )
+                
+                dual_decision = await dual_engine.get_dual_ai_decision(
                     market_data=market_data,
                     portfolio_data=portfolio_data,
-                    news_summary=news_summary,
-                    trade_value=max_investment_possible,
-                    strategy="cascading"  # Use cascading strategy for high-stakes
+                    news_summary=news_summary
                 )
+                
+                if dual_decision:
+                    total_analysis_cost += dual_decision.total_cost
+                    
+                    if dual_decision.review.approved and dual_decision.final_action == "BUY":
+                        # Extract enhanced exit strategy from dual-AI decision if available
+                        # The dual-AI system may include SL/TP recommendations in the forecaster's analysis
+                        sl_tp_recommendations = _extract_sl_tp_from_dual_ai(dual_decision, market_data)
 
-                # If advanced ensemble failed, try basic ensemble
-                if decision is None:
-                    logger.info(f"Advanced ensemble returned None, trying basic ensemble")
-                    decision = await xai_client.get_ensemble_decision(
+                        # Convert dual-AI decision to standard TradingDecision format
+                        decision = TradingDecision(
+                            action=dual_decision.final_action,
+                            side=dual_decision.final_side,
+                            confidence=dual_decision.final_confidence,
+                            limit_price=int(market_data.get('yes_price', 50) if dual_decision.final_side == 'YES' else market_data.get('no_price', 50)),
+                            reasoning=dual_decision.dual_ai_reasoning,
+                            stop_loss_cents=int(sl_tp_recommendations.get('stop_loss_price', 0) * 100) if sl_tp_recommendations.get('stop_loss_price') else None,
+                            take_profit_cents=int(sl_tp_recommendations.get('take_profit_price', 0) * 100) if sl_tp_recommendations.get('take_profit_price') else None
+                        )
+                        logger.info(f"✅ [DUAL-AI] Trade APPROVED: {decision.action} {decision.side} @ {decision.confidence:.1%}")
+                    else:
+                        # Critic rejected or forecaster said skip
+                        rejection_reason = dual_decision.review.critique if dual_decision else "No dual-AI decision"
+                        logger.info(f"🚫 [DUAL-AI] Trade REJECTED: {rejection_reason[:100]}...")
+                        await db_manager.record_market_analysis(
+                            market.market_id, "DUAL_AI_REJECTED", 0.0, total_analysis_cost, rejection_reason[:200]
+                        )
+                        # Continue with standard decision flow as fallback
+                        decision = None
+                else:
+                    logger.warning(f"⚠️ [DUAL-AI] No decision returned, falling back to standard flow")
+                    
+            except (XAIError, ValidationError) as e:
+                # Handle specific known errors
+                logger.warning(f"⚠️ [DUAL-AI] Known error: {e}, falling back to standard decision flow")
+                logger.debug(f"Dual AI error details: {e.context}", exc_info=True)
+            except Exception as e:
+                # Handle unexpected errors with full context
+                logger.warning(f"⚠️ [DUAL-AI] Unexpected error: {e}, falling back to standard decision flow")
+                logger.debug(f"Unexpected error traceback: {str(e)}", exc_info=True)
+                import traceback
+                logger.debug(f"Full traceback: {traceback.format_exc()}")
+        
+        # === FALLBACK: Standard ensemble/single-model decision ===
+        if decision is None:
+            # Enhanced ensemble decision logic with confidence and uncertainty handling
+            # Check which methods are available on the client
+            has_advanced_ensemble = hasattr(xai_client, 'get_advanced_ensemble_decision')
+            has_basic_ensemble = hasattr(xai_client, 'get_ensemble_decision')
+            has_trading_decision = hasattr(xai_client, 'get_trading_decision')
+
+            if settings.multi_model_ensemble and is_high_stakes and has_advanced_ensemble:
+                logger.info(f"Using enhanced multi-model ensemble for high-stakes market (max potential: ${max_investment_possible:.2f})")
+
+                # Try advanced ensemble first, fall back to basic ensemble if needed
+                try:
+                    decision = await xai_client.get_advanced_ensemble_decision(  # type: ignore
                         market_data=market_data,
                         portfolio_data=portfolio_data,
                         news_summary=news_summary,
-                        min_consensus_confidence=0.65  # Slightly stricter for high-stakes
+                        trade_value=max_investment_possible,
+                        strategy="cascading"  # Use cascading strategy for high-stakes
                     )
 
-            except Exception as e:
-                logger.warning(f"Advanced ensemble failed: {e}, falling back to basic ensemble")
-                decision = await xai_client.get_ensemble_decision(
-                    market_data=market_data,
-                    portfolio_data=portfolio_data,
-                    news_summary=news_summary,
-                    min_consensus_confidence=0.65
-                )
+                    # If advanced ensemble failed, try basic ensemble
+                    if decision is None and has_basic_ensemble:
+                        logger.info(f"Advanced ensemble returned None, trying basic ensemble")
+                        decision = await xai_client.get_ensemble_decision(  # type: ignore
+                            market_data=market_data,
+                            portfolio_data=portfolio_data,
+                            news_summary=news_summary,
+                            min_consensus_confidence=0.65  # Slightly stricter for high-stakes
+                        )
 
-        else:
-            # For low-value trades, use single model or basic ensemble if available
-            if (settings.multi_model_ensemble and
-                max_investment_possible >= settings.trading.ensemble_cascading_low_value_threshold):
+                except Exception as e:
+                    logger.warning(f"Advanced ensemble failed: {e}, falling back to basic ensemble")
+                    if has_basic_ensemble:
+                        decision = await xai_client.get_ensemble_decision(  # type: ignore
+                            market_data=market_data,
+                            portfolio_data=portfolio_data,
+                            news_summary=news_summary,
+                            min_consensus_confidence=0.65
+                        )
+
+            elif (settings.multi_model_ensemble and
+                  max_investment_possible >= settings.trading.ensemble_cascading_low_value_threshold and
+                  has_basic_ensemble):
                 # Use basic ensemble for medium-value trades
                 logger.info(f"Using basic ensemble for medium-value trade (max potential: ${max_investment_possible:.2f})")
-                decision = await xai_client.get_ensemble_decision(
+                decision = await xai_client.get_ensemble_decision(  # type: ignore
                     market_data=market_data,
                     portfolio_data=portfolio_data,
                     news_summary=news_summary,
                     min_consensus_confidence=0.60  # Standard confidence threshold
                 )
-            else:
-                # Use single model for low-value trades
+
+            elif has_trading_decision:
+                # Use single model for low-value trades or clients without ensemble support
+                logger.info(f"Using single model decision for trade (max potential: ${max_investment_possible:.2f})")
                 decision = await xai_client.get_trading_decision(
                     market_data=market_data,
                     portfolio_data=portfolio_data,
                     news_summary=news_summary,
                 )
+            else:
+                # No supported decision methods available
+                logger.error(f"Client {type(xai_client).__name__} does not support any decision methods")
+                decision = None
 
         # Estimate decision cost (this should come from the XAI client in the future)
         estimated_decision_cost = 0.015  # Rough estimate
@@ -484,6 +614,7 @@ async def make_decision_for_market(
                     time_to_expiry_days=get_time_to_expiry_days(market)
                 )
                 
+                # Use SL/TP from TradingDecision if available, otherwise use calculated exit strategy
                 position = Position(
                     market_id=market.market_id,
                     side=decision.side,
@@ -493,10 +624,10 @@ async def make_decision_for_market(
                     rationale=rationale,
                     confidence=confidence,
                     live=False,
-                    
-                    # Enhanced exit strategy fields using Grok4 recommendations
-                    stop_loss_price=exit_strategy['stop_loss_price'],
-                    take_profit_price=exit_strategy['take_profit_price'],
+
+                    # Enhanced exit strategy fields - prioritize TradingDecision SL/TP
+                    stop_loss_price=decision.stop_loss_cents / 100 if decision.stop_loss_cents else exit_strategy['stop_loss_price'],
+                    take_profit_price=decision.take_profit_cents / 100 if decision.take_profit_cents else exit_strategy['take_profit_price'],
                     max_hold_hours=exit_strategy['max_hold_hours'],
                     target_confidence_change=exit_strategy['target_confidence_change']
                 )
@@ -505,18 +636,38 @@ async def make_decision_for_market(
         return None
 
     except Exception as e:
-        logger.error(
-            f"Failed to process market {market.market_id}: {market.title}",
-            error=str(e),
-            exc_info=True
-        )
-        # Record failed analysis
+        # Enhanced error categorization for better monitoring
+        error_type = type(e).__name__
+        if isinstance(e, (XAIError, ValidationError, DatabaseError)):
+            # Known error types with structured context
+            logger.error(
+                f"Failed to process market {market.market_id}: {market.title}",
+                error_type=error_type,
+                error=str(e),
+                context=getattr(e, 'context', {}),
+                exc_info=True
+            )
+        else:
+            # Unexpected errors
+            market_id = market.market_id if market else 'unknown'
+            market_title = market.title if market else 'unknown'
+            logger.error(
+                f"Unexpected error processing market {market_id}: {market_title}",
+                error_type=error_type,
+                error=str(e),
+                exc_info=True
+            )
+        # Record failed analysis with proper error handling
         try:
             await db_manager.record_market_analysis(
                 market.market_id, "ERROR", 0.0, 0.01, "error"
             )
-        except:
-            pass  # Don't fail on logging failure
+        except Exception as log_error:
+            # Log the logging error but don't raise it to avoid masking original error
+            logger.error(
+                f"Failed to record market analysis error for {market.market_id}: {log_error}",
+                original_error=str(e)
+            )
         return None
 
 
@@ -620,4 +771,127 @@ def get_time_to_expiry_days(market: Market) -> float:
             return 7.0  # Default 7 days
     except Exception as e:
         logger.error(f"Error calculating time to expiry: {e}")
-        return 7.0
+        return 7.0  # Default 7 days on error
+
+
+def _extract_sl_tp_from_dual_ai(dual_decision, market_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Extract stop-loss and take-profit recommendations from dual-AI decision.
+
+    The dual-AI forecaster (Grok) may provide SL/TP recommendations in its reasoning.
+    This function parses that information and extracts it for position management.
+
+    Args:
+        dual_decision: DualAIDecision containing forecaster analysis
+        market_data: Market data for fallback calculations
+
+    Returns:
+        Dictionary containing SL/TP recommendations or empty dict if none found
+    """
+    sl_tp_recommendations = {}
+
+    try:
+        # Check if the forecaster's reasoning contains SL/TP recommendations
+        forecast_reasoning = ""
+        if dual_decision and dual_decision.forecast and dual_decision.forecast.reasoning:
+            forecast_reasoning = str(dual_decision.forecast.reasoning)
+
+        # Look for explicit stop-loss mentions
+        sl_patterns = [
+            r"stop[-\s]?loss[:\s]*\$?([\d.]+)",
+            r"sl[:\s]*\$?([\d.]+)",
+            r"stop[-\s]?loss at \$?([\d.]+)",
+            r"exit if below \$?([\d.]+)"
+        ]
+
+        # Look for explicit take-profit mentions
+        tp_patterns = [
+            r"take[-\s]?profit[:\s]*\$?([\d.]+)",
+            r"tp[:\s]*\$?([\d.]+)",
+            r"target[:\s]*\$?([\d.]+)",
+            r"exit if above \$?([\d.]+)",
+            r"sell at \$?([\d.]+)"
+        ]
+
+        # Look for max hold time mentions
+        hold_patterns = [
+            r"hold.*?(\d+)\s*hours?",
+            r"(\d+)\s*hours?.*?max",
+            r"max.*?(\d+)\s*hours?",
+            r"(\d+)h.*?hold"
+        ]
+
+        # Search for stop-loss price
+        import re
+        for pattern in sl_patterns:
+            match = re.search(pattern, forecast_reasoning.lower())
+            if match:
+                sl_price = float(match.group(1))
+                # Convert to 0-1 range (dollar format)
+                if sl_price > 1:
+                    sl_price = sl_price / 100
+                sl_tp_recommendations['stop_loss_price'] = round(sl_price, 2)
+                break
+
+        # Search for take-profit price
+        for pattern in tp_patterns:
+            match = re.search(pattern, forecast_reasoning.lower())
+            if match:
+                tp_price = float(match.group(1))
+                # Convert to 0-1 range (dollar format)
+                if tp_price > 1:
+                    tp_price = tp_price / 100
+                sl_tp_recommendations['take_profit_price'] = round(tp_price, 2)
+                break
+
+        # Search for max hold hours
+        for pattern in hold_patterns:
+            match = re.search(pattern, forecast_reasoning.lower())
+            if match:
+                sl_tp_recommendations['max_hold_hours'] = int(match.group(1))
+                break
+
+        # If no explicit recommendations found, calculate based on confidence and market conditions
+        if not sl_tp_recommendations:
+            logger.info("No explicit SL/TP recommendations in dual-AI reasoning, calculating from market conditions")
+
+            # Use the existing stop loss calculator as fallback
+            price = market_data.get('yes_price', 0.5) if dual_decision.final_side == 'YES' else market_data.get('no_price', 0.5)
+            confidence = dual_decision.final_confidence
+
+            # Create a mock market object for the calculator
+            from types import SimpleNamespace
+            mock_market = SimpleNamespace()
+            mock_market.yes_price = market_data.get('yes_price', 0.5)
+            mock_market.no_price = market_data.get('no_price', 0.5)
+            mock_market.volume = market_data.get('volume', 1000)
+            mock_market.expiration_ts = market_data.get('expiration_ts', time.time() + 7 * 86400)
+            mock_market.market_id = market_data.get('market_id', 'unknown')
+
+            # Calculate exit strategy using existing logic
+            exit_strategy = calculate_dynamic_exit_strategy(
+                confidence=confidence,
+                market_volatility=estimate_market_volatility(mock_market),
+                time_to_expiry=get_time_to_expiry_days(mock_market),
+                current_price=price,
+                edge_magnitude=abs(confidence - price)
+            )
+
+            sl_tp_recommendations = {
+                'stop_loss_price': exit_strategy['stop_loss_price'],
+                'take_profit_price': exit_strategy['take_profit_price'],
+                'max_hold_hours': exit_strategy['max_hold_hours'],
+                'target_confidence_change': exit_strategy['target_confidence_change']
+            }
+
+            logger.info(f"Calculated SL/TP for dual-AI decision: {sl_tp_recommendations}")
+
+        else:
+            logger.info(f"Found explicit SL/TP recommendations in dual-AI reasoning: {sl_tp_recommendations}")
+
+    except Exception as e:
+        logger.warning(f"Error extracting SL/TP from dual-AI decision: {e}")
+        # Return empty dict to fall back to default behavior
+        return {}
+
+    return sl_tp_recommendations

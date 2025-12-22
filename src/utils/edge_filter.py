@@ -233,25 +233,33 @@ class EdgeFilter:
             volume = additional_filters.get('volume', 0)
             min_volume = additional_filters.get('min_volume', 1000)
             time_to_expiry = additional_filters.get('time_to_expiry_days', 0)
-            max_time_to_expiry = additional_filters.get('max_time_to_expiry', 14)
+            
+            # Get max time to expiry from settings (default 1 day = 24 hours)
+            try:
+                from src.config.settings import settings
+                default_max_expiry = settings.trading.max_time_to_expiry_days
+            except Exception:
+                default_max_expiry = 1  # Default to 1 day if settings unavailable
+            
+            max_time_to_expiry = additional_filters.get('max_time_to_expiry', default_max_expiry)
             
             if volume < min_volume:
                 return False, f"Volume {volume} below minimum {min_volume}", edge_result
 
+            # STRICT: Reject markets expiring beyond max time regardless of confidence
+            if time_to_expiry > max_time_to_expiry:
+                return False, f"Market expires in {time_to_expiry:.1f} days, exceeds {max_time_to_expiry} day limit", edge_result
+            
+            # Additional check for lower confidence on longer-term markets
             try:
                 from src.config.settings import settings
                 long_term_min_conf = settings.trading.min_confidence_long_term
             except Exception:
                 long_term_min_conf = cls.MIN_CONFIDENCE_FOR_TRADE
 
-            if time_to_expiry > max_time_to_expiry and confidence < long_term_min_conf:
-                return False, f"Long-term market confidence {confidence:.1%} below {long_term_min_conf:.1%}", edge_result
-            
-            time_to_expiry = additional_filters.get('time_to_expiry_days', 30)
-            max_time = additional_filters.get('max_time_to_expiry', 365)
-            
-            if time_to_expiry > max_time:
-                return False, f"Time to expiry {time_to_expiry} days exceeds maximum {max_time}", edge_result
+            # For markets closer to max expiry, require higher confidence
+            if time_to_expiry > (max_time_to_expiry * 0.5) and confidence < long_term_min_conf:
+                return False, f"Near-expiry market needs confidence {long_term_min_conf:.1%}, got {confidence:.1%}", edge_result
         
         return True, f"TRADE APPROVED: {edge_result.reason}", edge_result
     

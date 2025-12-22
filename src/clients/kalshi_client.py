@@ -5,14 +5,11 @@ Handles authentication, market data, and trade execution.
 
 import asyncio
 import base64
-import hashlib
-import hmac
 import json
 import os
 import time
-from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any
 from urllib.parse import urlencode
 
 import httpx
@@ -237,7 +234,7 @@ class KalshiClient(TradingLoggerMixin):
                 )
                 
                 # Add aggressive delay between requests to prevent 429s
-                await asyncio.sleep(0.5)  # 500ms delay = max 2 requests/second
+                await asyncio.sleep(2.0)  # 2000ms delay for maximum safety against 429s
                 
                 response = await self.client.request(
                     method=method,

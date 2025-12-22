@@ -64,19 +64,19 @@ def run_quick_tests():
     
     # Test 1: Import checks (very fast)
     results.append(run_command_live(
-        "python -c \"from src.jobs.decide import make_decision_for_market; from src.jobs.execute import execute_position; from src.jobs.track import run_tracking; print('✅ All imports successful')\"",
+        f"{sys.executable} -c \"from src.jobs.decide import make_decision_for_market; from src.jobs.execute import execute_position; from src.jobs.track import run_tracking; print('✅ All imports successful')\"",
         "Critical imports check"
     ))
     
     # Test 2: Configuration check (very fast)  
     results.append(run_command_live(
-        "python -c \"from src.config.settings import settings; print(f'✅ Primary model: {settings.trading.primary_model}'); print(f'✅ Max position size: {settings.trading.max_position_size_pct}%')\"",
+        f"{sys.executable} -c \"from src.config.settings import settings; print(f'✅ Primary model: {{settings.trading.primary_model}}'); print(f'✅ Max position size: {{settings.trading.max_position_size_pct}}%')\"",
         "Configuration validation"
     ))
     
     # Test 3: Database module (fast)
     results.append(run_command_live(
-        "python -c \"from src.utils.database import DatabaseManager; print('✅ Database module working')\"",
+        f"{sys.executable} -c \"from src.utils.database import DatabaseManager; print('✅ Database module working')\"",
         "Database module check"
     ))
     
@@ -92,13 +92,13 @@ def run_full_tests():
     
     # Test 4: Run optimized pytest (with limited API calls)
     results.append(run_command_live(
-        "python -m pytest tests/test_database.py tests/test_helpers.py -v --tb=short -s",
+        f"{sys.executable} -m pytest tests/test_database.py tests/test_helpers.py -v --tb=short -s",
         "Database and helper tests"
     ))
     
     # Test 5: Run decision test (limited to 1 market)
     results.append(run_command_live(
-        "python -m pytest tests/test_decide.py::test_make_decision_for_market_creates_position -v --tb=short -s",
+        f"{sys.executable} -m pytest tests/test_decide.py::test_make_decision_for_market_creates_position -v --tb=short -s",
         "Decision engine test (1 market)"
     ))
     
@@ -130,7 +130,7 @@ def main():
         if test_pattern:
             results = run_quick_tests()
             results.append(run_command_live(
-                f"python -m pytest {test_pattern} -v --tb=short -s",
+                f"{sys.executable} -m pytest {test_pattern} -v --tb=short -s",
                 f"Custom test: {test_pattern}"
             ))
         else:
