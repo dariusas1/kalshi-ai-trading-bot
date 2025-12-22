@@ -189,7 +189,6 @@ class RiskValidator:
             max_daily_loss_pct: Maximum daily loss as percentage
             max_position_pct: Maximum position size as percentage
             max_concurrent_positions: Maximum number of concurrent positions
-            account_balance: Current account balance
 
         Raises:
             ValidationError: If any risk parameter is invalid

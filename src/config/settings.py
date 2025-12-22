@@ -47,7 +47,7 @@ class TradingConfig:
     scan_interval_seconds: int = 90      # Scan markets every 90 seconds
     
     # AI model configuration
-    primary_model: str = "grok-4.1" # DO NOT CHANGE THIS UNDER ANY CIRCUMSTANCES
+    primary_model: str = "grok-4-1-fast-reasoning" # xAI fast reasoning model
     fallback_model: str = "grok-3"  # Fallback to available model
     ai_temperature: float = 0  # Lower temperature for more consistent JSON output
     ai_max_tokens: int = 8000    # Reasonable limit for reasoning models (grok-4 works better with 8000)

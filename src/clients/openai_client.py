@@ -72,9 +72,9 @@ class OpenAIClient(TradingLoggerMixin):
             max_retries=3
         )
 
-        # Model configuration
-        self.primary_model = settings.trading.primary_model
-        self.fallback_model = settings.trading.fallback_model
+        # Model configuration - OpenAI uses different models than xAI
+        self.primary_model = "gpt-5.2"  # Use GPT-5.2 for OpenAI as requested
+        self.fallback_model = "gpt-4"   # Fallback to GPT-4 if needed
         self.temperature = settings.trading.ai_temperature
         self.max_tokens = settings.trading.ai_max_tokens
         

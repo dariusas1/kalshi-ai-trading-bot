@@ -1441,7 +1441,7 @@ class DatabaseManager(TradingLoggerMixin):
                         }
 
                     fill_dict = dict(fill)
-                    side = fill.get('side', 'yes').lower()  # Default to 'yes' for safety
+                    side = fill_dict.get('side', 'yes').lower()  # Default to 'yes' for safety
 
                     if fill['action'] == 'buy':
                         fills_by_ticker[ticker][side]['buys'].append(fill_dict)
@@ -1532,7 +1532,7 @@ class DatabaseManager(TradingLoggerMixin):
                                     pnl,
                                     buy_time,
                                     sell_time,
-                                    f"Auto-matched from fills (buy_id={buy.get('fill_id')}, sell_id={sell.get('fill_id')})",
+                                    f"Auto-matched from fills (buy_id={dict(buy).get('fill_id')}, sell_id={dict(sell).get('fill_id')})",
                                     'kalshi_sync'
                                 ))
                                 trades_created += 1
@@ -2890,9 +2890,9 @@ class DatabaseManager(TradingLoggerMixin):
                 if row:
                     return dict(row)
                 return None
-        except Exception as e:
-            self.logger.exception(f"Error checking idempotency key: {e}")
-            raise e
+        except Exception:
+            self.logger.exception("Error checking idempotency key")
+            raise
 
     async def update_idempotency_result(
         self,
@@ -2969,9 +2969,9 @@ class DatabaseManager(TradingLoggerMixin):
                     "manual_override": False,
                     "total_account_balance": 0.0
                 }
-        except Exception as e:
-            self.logger.error(f"Error getting circuit breaker state: {e}")
-            return {"is_paused": True, "pause_reason": f"Error reading state: {e}"}
+        except Exception:
+            self.logger.exception("Error getting circuit breaker state")
+            return {"is_paused": True, "pause_reason": "Error reading state"}
 
     async def set_circuit_breaker_paused(self, is_paused: bool, reason: Optional[str] = None) -> bool:
         """
@@ -3018,7 +3018,16 @@ class DatabaseManager(TradingLoggerMixin):
                 db.row_factory = aiosqlite.Row
                 cursor = await db.execute("SELECT * FROM circuit_breaker_state WHERE id = 1")
                 row = await cursor.fetchone()
-                state = dict(row) if row else {}
+                cursor = await db.execute("SELECT * FROM circuit_breaker_state WHERE id = 1")
+                row = await cursor.fetchone()
+                
+                # Ensure row exists (defensive programming)
+                if not row:
+                    # Should verify init_database has run, but here we can return neutral state
+                    self.logger.warning("Circuit breaker state row missing during hourly update check")
+                    return {"hourly_loss": 0, "should_trip": False, "loss_pct": 0}
+                    
+                state = dict(row)
                 
                 # Check if we need to reset the hourly window
                 window_start_str = state.get("hourly_window_start")
@@ -3026,7 +3035,7 @@ class DatabaseManager(TradingLoggerMixin):
                     window_start = datetime.fromisoformat(window_start_str)
                     if window_start.tzinfo is None:
                         window_start = window_start.replace(tzinfo=timezone.utc)
-                    if datetime.now(timezone.utc) - window_start > timedelta(hours=1):
+                    if datetime.now(timezone.utc) > window_start + timedelta(hours=1):
                         # Reset hourly window
                         await db.execute("""
                             UPDATE circuit_breaker_state 
@@ -3057,8 +3066,8 @@ class DatabaseManager(TradingLoggerMixin):
                     "should_trip": loss_pct >= loss_threshold_pct,  # Use configurable threshold
                     "loss_pct": loss_pct
                 }
-        except Exception as e:
-            self.logger.error(f"Error updating circuit breaker hourly loss: {e}")
+        except Exception:
+            self.logger.exception("Error updating circuit breaker hourly loss")
             return {"hourly_loss": 0, "should_trip": False, "loss_pct": 0}
 
     async def reset_circuit_breaker(self) -> bool:

@@ -83,9 +83,9 @@ class EnhancedAIClient(TradingLoggerMixin):
             try:
                 if log_query:
                     self.logger.info("Attempting completion with xAI")
+                # xAI client doesn't accept model parameter, use default
                 return await self.xai_client.get_completion(
                     prompt=prompt,
-                    model=model,
                     max_tokens=max_tokens,
                     temperature=temperature,
                     strategy=strategy or "unknown",

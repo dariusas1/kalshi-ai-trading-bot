@@ -995,7 +995,7 @@ class AdvancedPortfolioOptimizer:
         except:
             return np.eye(matrix.shape[0])
 
-    async def _estimate_portfolio_max_drawdown(self, weights: np.ndarray, opportunities: List[MarketOpportunity]) -> float:
+    def _estimate_portfolio_max_drawdown(self, weights: np.ndarray, opportunities: List[MarketOpportunity]) -> float:
         """Estimate portfolio maximum drawdown."""
         # Simplified approximation
         individual_mdd = np.array([opp.max_drawdown_contribution for opp in opportunities])

@@ -648,8 +648,10 @@ async def make_decision_for_market(
             )
         else:
             # Unexpected errors
+            market_id = market.market_id if market else 'unknown'
+            market_title = market.title if market else 'unknown'
             logger.error(
-                f"Unexpected error processing market {market.market_id}: {market.title}",
+                f"Unexpected error processing market {market_id}: {market_title}",
                 error_type=error_type,
                 error=str(e),
                 exc_info=True
@@ -789,7 +791,9 @@ def _extract_sl_tp_from_dual_ai(dual_decision, market_data: Dict[str, Any]) -> D
 
     try:
         # Check if the forecaster's reasoning contains SL/TP recommendations
-        forecast_reasoning = dual_decision.forecast.reasoning if dual_decision.forecast else ""
+        forecast_reasoning = ""
+        if dual_decision and dual_decision.forecast and dual_decision.forecast.reasoning:
+            forecast_reasoning = str(dual_decision.forecast.reasoning)
 
         # Look for explicit stop-loss mentions
         sl_patterns = [
