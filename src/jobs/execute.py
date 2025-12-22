@@ -673,7 +673,7 @@ async def auto_exit_expiring_positions(
                     if exp_str:
                         try:
                             expiration_ts = int(datetime.fromisoformat(exp_str.replace('Z', '+00:00')).timestamp())
-                        except:
+                        except (ValueError, TypeError):
                             continue
                     else:
                         continue
@@ -682,8 +682,8 @@ async def auto_exit_expiring_positions(
                 if isinstance(expiration_ts, str):
                     try:
                         expiration_ts = int(datetime.fromisoformat(expiration_ts.replace('Z', '+00:00')).timestamp())
-                    except:
-                        expiration_ts = int(expiration_ts) if expiration_ts.isdigit() else 0
+                    except (ValueError, TypeError):
+                        expiration_ts = int(expiration_ts) if str(expiration_ts).isdigit() else 0
                 
                 # Check if market expires within threshold
                 if expiration_ts <= expiry_threshold_ts:

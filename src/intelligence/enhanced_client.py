@@ -74,6 +74,9 @@ class EnhancedAIClient(TradingLoggerMixin):
     ) -> Optional[str]:
         """
         Get completion with fallback support.
+
+        Note: model parameter is only used for xAI requests. OpenAI fallback uses
+        the model configured in the OpenAI client.
         """
         # 1. Try xAI (Primary)
         if not self.xai_client.is_api_exhausted:
@@ -82,6 +85,7 @@ class EnhancedAIClient(TradingLoggerMixin):
                     self.logger.info("Attempting completion with xAI")
                 return await self.xai_client.get_completion(
                     prompt=prompt,
+                    model=model,
                     max_tokens=max_tokens,
                     temperature=temperature,
                     strategy=strategy or "unknown",
@@ -97,7 +101,7 @@ class EnhancedAIClient(TradingLoggerMixin):
             # OpenAI client expects messages, not raw prompt for chat models
             messages = [{"role": "user", "content": prompt}]
             response, _ = await self.openai_client._make_completion_request(
-                messages, 
+                messages,
                 temperature=temperature,
                 max_tokens=max_tokens
             )

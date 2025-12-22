@@ -93,7 +93,7 @@ class MarketDataValidator:
                 raise ValidationError(f"Missing required field: {field}", field=field)
 
         # Validate action
-        valid_actions = ['BUY', 'SELL', 'HOLD', 'CANCEL']
+        valid_actions = ['BUY', 'SELL', 'HOLD', 'CANCEL', 'SKIP']
         if decision['action'] not in valid_actions:
             raise ValidationError(
                 f"Invalid action: {decision['action']}",
@@ -180,8 +180,7 @@ class RiskValidator:
     def validate_risk_parameters(
         max_daily_loss_pct: float,
         max_position_pct: float,
-        max_concurrent_positions: int,
-        account_balance: float
+        max_concurrent_positions: int
     ) -> None:
         """
         Validate risk management parameters.
@@ -207,11 +206,8 @@ class RiskValidator:
                 field='max_position_pct'
             )
 
-        if max_daily_loss_pct > max_position_pct:
-            raise ValidationError(
-                "Daily loss limit cannot exceed position limit",
-                context={'max_daily_loss_pct': max_daily_loss_pct, 'max_position_pct': max_position_pct}
-            )
+        # FIXED: Removed incorrect validation that max_daily_loss_pct <= max_position_pct
+        # It is valid to have cumulative daily loss limit > single position limit.
 
         if not isinstance(max_concurrent_positions, int) or max_concurrent_positions <= 0:
             raise ValidationError(

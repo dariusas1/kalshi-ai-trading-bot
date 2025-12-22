@@ -81,6 +81,10 @@ class TestFallbackManager:
         with patch.object(fallback_manager, '_check_provider_health_internal') as mock_health:
             mock_health.side_effect = lambda name: health_results.get(name, HealthCheckResult(name, False, "Unknown"))
 
+            # Initialize provider health status
+            for name in fallback_manager.providers:
+                await fallback_manager.check_provider_health(name)
+
             # Get available providers
             available_providers = await fallback_manager.get_available_providers()
 
@@ -101,6 +105,10 @@ class TestFallbackManager:
 
         with patch.object(fallback_manager, '_check_provider_health_internal') as mock_health:
             mock_health.side_effect = lambda name: health_results.get(name, HealthCheckResult(name, False))
+
+            # Initialize provider health status
+            for name in fallback_manager.providers:
+                await fallback_manager.check_provider_health(name)
 
             # Check system status
             status = await fallback_manager.get_system_status()
@@ -183,6 +191,10 @@ class TestFallbackManager:
         with patch.object(fallback_manager, '_check_provider_health_internal') as mock_health:
             mock_health.side_effect = side_effect
 
+            # Initialize provider health status
+            for name in fallback_manager.providers:
+                await fallback_manager.check_provider_health(name)
+
             # Test initial state
             provider1 = await fallback_manager.get_best_provider()
             assert provider1.name == "xai"
@@ -220,6 +232,10 @@ class TestFallbackManager:
 
             # Simulate recovery
             current_health = health_up
+
+            # Force full health check update
+            for name in fallback_manager.providers:
+                await fallback_manager.check_provider_health(name)
 
             # Force recovery check
             can_recover = await fallback_manager.check_recovery()

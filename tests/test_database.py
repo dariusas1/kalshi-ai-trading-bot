@@ -4,6 +4,9 @@ import asyncio
 from datetime import datetime, timedelta
 from src.utils.database import Market, Position
 
+TEST_DB = "test_trading_system.db"
+
+
 class TestDatabaseManager:
     """Verify database operations"""
 

@@ -855,8 +855,8 @@ def _extract_sl_tp_from_dual_ai(dual_decision, market_data: Dict[str, Any]) -> D
             confidence = dual_decision.final_confidence
 
             # Create a mock market object for the calculator
-            from unittest.mock import Mock
-            mock_market = Mock()
+            from types import SimpleNamespace
+            mock_market = SimpleNamespace()
             mock_market.yes_price = market_data.get('yes_price', 0.5)
             mock_market.no_price = market_data.get('no_price', 0.5)
             mock_market.volume = market_data.get('volume', 1000)

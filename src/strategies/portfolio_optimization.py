@@ -995,7 +995,7 @@ class AdvancedPortfolioOptimizer:
         except:
             return np.eye(matrix.shape[0])
 
-    def _estimate_portfolio_max_drawdown(self, weights: np.ndarray, opportunities: List[MarketOpportunity]) -> float:
+    async def _estimate_portfolio_max_drawdown(self, weights: np.ndarray, opportunities: List[MarketOpportunity]) -> float:
         """Estimate portfolio maximum drawdown."""
         # Simplified approximation
         individual_mdd = np.array([opp.max_drawdown_contribution for opp in opportunities])
@@ -1023,87 +1023,88 @@ class AdvancedPortfolioOptimizer:
             'portfolio_growth_rate': 0.0
         }
 
-    def _validate_ai_exit_levels(self, stop_loss_cents: float, take_profit_cents: float, entry_price: float, side: str) -> bool:
-        """
-        Validate AI-recommended stop loss and take profit levels for safety and reasonableness.
 
-        Security validation ensures AI recommendations cannot cause dangerous trading behavior:
-        1. Reasonable value ranges (1-99 cents)
-        2. Logical relationships with entry price and side
-        3. Risk/reward ratio within acceptable bounds
-        4. Not allowing extreme leverage or certain losses
+def validate_ai_exit_levels(stop_loss_cents: float, take_profit_cents: float, entry_price: float, side: str, logger=None) -> bool:
+    """
+    Validate AI-recommended stop loss and take profit levels for safety and reasonableness.
 
-        Args:
-            stop_loss_cents: AI-recommended stop loss in cents
-            take_profit_cents: AI-recommended take profit in cents
-            entry_price: Current entry price in dollars
-            side: Trading side ("YES" or "NO")
+    Security validation ensures AI recommendations cannot cause dangerous trading behavior:
+    1. Reasonable value ranges (1-99 cents)
+    2. Logical relationships with entry price and side
+    3. Risk/reward ratio within acceptable bounds
+    4. Not allowing extreme leverage or certain losses
 
-        Returns:
-            bool: True if values are safe and reasonable, False if rejected
-        """
-        try:
-            # Convert to dollars for validation
-            stop_loss = stop_loss_cents / 100
-            take_profit = take_profit_cents / 100
+    Args:
+        stop_loss_cents: AI-recommended stop loss in cents
+        take_profit_cents: AI-recommended take profit in cents
+        entry_price: Current entry price in dollars
+        side: Trading side ("YES" or "NO")
+        logger: Logger instance (optional)
 
-            # Basic range validation (1-99 cents = $0.01-$0.99)
-            if not (1 <= stop_loss_cents <= 99 and 1 <= take_profit_cents <= 99):
-                self.logger.warning(f"🚨 AI exit levels out of range: SL={stop_loss_cents}c, TP={take_profit_cents}c (must be 1-99c)")
-                return False
+    Returns:
+        bool: True if values are safe and reasonable, False if rejected
+    """
+    if logger is None:
+        import logging
+        logger = logging.getLogger(__name__)
 
-            # Ensure take profit is higher than stop loss (profitable exit)
-            if take_profit <= stop_loss:
-                self.logger.warning(f"🚨 AI exit levels not profitable: TP={take_profit_cents}c <= SL={stop_loss_cents}c")
-                return False
+    try:
+        # Convert to dollars for validation
+        stop_loss = stop_loss_cents / 100
+        take_profit = take_profit_cents / 100
 
-            # Validate relationship with entry price based on side
-            if side.upper() == "YES":
-                # For YES contracts: lower prices are worse, higher prices are better
-                # Stop loss should be below entry, take profit should be above entry
-                if not (stop_loss < entry_price < take_profit):
-                    self.logger.warning(f"🚨 AI YES exit levels invalid: SL={stop_loss:.2f} < entry={entry_price:.2f} < TP={take_profit:.2f} required")
-                    return False
-            elif side.upper() == "NO":
-                # For NO contracts: higher prices are worse, lower prices are better
-                # Stop loss should be above entry, take profit should be below entry
-                if not (stop_loss > entry_price > take_profit):
-                    self.logger.warning(f"🚨 AI NO exit levels invalid: SL={stop_loss:.2f} > entry={entry_price:.2f} > TP={take_profit:.2f} required")
-                    return False
-
-            # Risk/reward ratio validation (avoid excessive risk)
-            potential_loss = abs(entry_price - stop_loss)
-            potential_profit = abs(take_profit - entry_price)
-
-            if potential_loss <= 0:
-                self.logger.warning("🚨 AI exit levels would not protect against losses")
-                return False
-
-            # Risk/reward ratio should be at least 1:1 (avoid risky trades)
-            risk_reward_ratio = potential_profit / potential_loss
-            if risk_reward_ratio < 0.8:  # Allow slightly unfavorable but not excessive
-                self.logger.warning(f"🚨 AI exit levels poor risk/reward: {risk_reward_ratio:.2f} (minimum 0.8)")
-                return False
-
-            # Maximum potential loss should not exceed 50% of entry value
-            max_loss_pct = (potential_loss / entry_price) * 100 if entry_price > 0 else 100
-            if max_loss_pct > 50:
-                self.logger.warning(f"🚨 AI exit levels excessive risk: {max_loss_pct:.1f}% loss (max 50%)")
-                return False
-
-            # Maximum potential profit should not be unrealistic (>10x entry value)
-            max_profit_pct = (potential_profit / entry_price) if entry_price > 0 else 10
-            if max_profit_pct > 10:
-                self.logger.warning(f"🚨 AI exit levels unrealistic profit: {max_profit_pct:.1f}x return (max 10x)")
-                return False
-
-            # Passed all validations
-            self.logger.info(f"✅ AI exit levels validated: SL={stop_loss:.2f}, TP={take_profit:.2f}, RR={risk_reward_ratio:.2f}x")
-            return True
-
-        except Exception as e:
-            self.logger.error(f"Error validating AI exit levels: {e}")
+        # Basic range validation (1-99 cents = $0.01-$0.99)
+        if not (1 <= stop_loss_cents <= 99 and 1 <= take_profit_cents <= 99):
+            logger.warning(f"🚨 AI exit levels out of range: SL={stop_loss_cents}c, TP={take_profit_cents}c (must be 1-99c)")
             return False
+
+        # Validate relationship with entry price based on side
+        if side.upper() == "YES":
+            # For YES contracts: lower prices are worse, higher prices are better
+            # Stop loss should be below entry, take profit should be above entry
+            if not (stop_loss < entry_price < take_profit):
+                logger.warning(f"🚨 AI YES exit levels invalid: SL={stop_loss:.2f} < entry={entry_price:.2f} < TP={take_profit:.2f} required")
+                return False
+        elif side.upper() == "NO":
+            # For NO contracts: higher prices are worse, lower prices are better
+            # Stop loss should be above entry, take profit should be below entry
+            if not (stop_loss > entry_price > take_profit):
+                logger.warning(f"🚨 AI NO exit levels invalid: SL={stop_loss:.2f} > entry={entry_price:.2f} > TP={take_profit:.2f} required")
+                return False
+
+        # Risk/reward ratio validation (avoid excessive risk)
+        potential_loss = abs(entry_price - stop_loss)
+        potential_profit = abs(take_profit - entry_price)
+
+        if potential_loss <= 0:
+            logger.warning("🚨 AI exit levels would not protect against losses")
+            return False
+
+        # Risk/reward ratio should be at least 1:1 (avoid risky trades)
+        risk_reward_ratio = potential_profit / potential_loss
+        if risk_reward_ratio < 0.8:  # Allow slightly unfavorable but not excessive
+            logger.warning(f"🚨 AI exit levels poor risk/reward: {risk_reward_ratio:.2f} (minimum 0.8)")
+            return False
+
+        # Maximum potential loss should not exceed 50% of entry value
+        max_loss_pct = (potential_loss / entry_price) * 100 if entry_price > 0 else 100
+        if max_loss_pct > 50:
+            logger.warning(f"🚨 AI exit levels excessive risk: {max_loss_pct:.1f}% loss (max 50%)")
+            return False
+
+        # Maximum potential profit should not be unrealistic (>10x entry value)
+        max_profit_pct = (potential_profit / entry_price) if entry_price > 0 else 10
+        if max_profit_pct > 10:
+            logger.warning(f"🚨 AI exit levels unrealistic profit: {max_profit_pct:.1f}x return (max 10x)")
+            return False
+
+        # Passed all validations
+        logger.info(f"✅ AI exit levels validated: SL={stop_loss:.2f}, TP={take_profit:.2f}, RR={risk_reward_ratio:.2f}x")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error validating AI exit levels: {e}")
+        return False
 
 
 async def create_market_opportunities_from_markets(
@@ -1467,7 +1468,7 @@ async def _evaluate_immediate_trade(
         # Validate AI-recommended values for safety and reasonableness
         if ai_stop_loss and ai_take_profit:
             # Security validation for AI output
-            if self._validate_ai_exit_levels(ai_stop_loss, ai_take_profit, entry_price, side):
+            if validate_ai_exit_levels(ai_stop_loss, ai_take_profit, entry_price, side, logger):
                 # Use AI-recommended levels (convert cents to decimal)
                 stop_loss_price = ai_stop_loss / 100
                 take_profit_price = ai_take_profit / 100

@@ -23,7 +23,7 @@ Key innovations:
 import asyncio
 import logging
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 from dataclasses import dataclass
 
 from src.clients.kalshi_client import KalshiClient

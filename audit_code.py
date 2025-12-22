@@ -49,7 +49,10 @@ def find_stubs_and_hardcoded(root_dir):
                                 stubs.append((filepath, node.lineno, node.name, f"Only pass ({func_type})"))
                             elif isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) and stmt.value.value is Ellipsis:
                                 stubs.append((filepath, node.lineno, node.name, f"Only ... ({func_type})"))
-                            elif isinstance(stmt, ast.Raise) and isinstance(stmt.exc, ast.Name) and stmt.exc.id == "NotImplementedError":
+                            elif isinstance(stmt, ast.Raise) and (
+                                (isinstance(stmt.exc, ast.Name) and stmt.exc.id == "NotImplementedError") or
+                                (isinstance(stmt.exc, ast.Call) and isinstance(stmt.exc.func, ast.Name) and stmt.exc.func.id == "NotImplementedError")
+                            ):
                                 stubs.append((filepath, node.lineno, node.name, f"Only raise NotImplementedError ({func_type})"))
                             elif isinstance(stmt, ast.Return) and stmt.value is None:
                                 # return None is valid sometimes, but worth checking for async functions specifically

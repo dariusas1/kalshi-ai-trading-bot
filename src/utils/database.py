@@ -1907,6 +1907,8 @@ class DatabaseManager(TradingLoggerMixin):
             if row:
                 # Check expiry (optional, processor runs every 5 mins)
                 computed_at = datetime.fromisoformat(row['computed_at'])
+                if computed_at.tzinfo is None:
+                    computed_at = computed_at.replace(tzinfo=timezone.utc)
                 if (datetime.now(timezone.utc) - computed_at).total_seconds() < 900:  # 15 mins
                     return json.loads(row['value'])
             return None
@@ -2889,8 +2891,8 @@ class DatabaseManager(TradingLoggerMixin):
                     return dict(row)
                 return None
         except Exception as e:
-            self.logger.error(f"Error checking idempotency key: {e}")
-            return None
+            self.logger.exception(f"Error checking idempotency key: {e}")
+            raise e
 
     async def update_idempotency_result(
         self,
@@ -3022,6 +3024,8 @@ class DatabaseManager(TradingLoggerMixin):
                 window_start_str = state.get("hourly_window_start")
                 if window_start_str:
                     window_start = datetime.fromisoformat(window_start_str)
+                    if window_start.tzinfo is None:
+                        window_start = window_start.replace(tzinfo=timezone.utc)
                     if datetime.now(timezone.utc) - window_start > timedelta(hours=1):
                         # Reset hourly window
                         await db.execute("""

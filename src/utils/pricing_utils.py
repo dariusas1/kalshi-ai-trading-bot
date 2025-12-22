@@ -5,7 +5,7 @@ Handles price unit conversions, bid/ask logic, and price validation.
 """
 
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 from src.exceptions.trading import ValidationError
 
 logger = logging.getLogger(__name__)
@@ -91,7 +91,7 @@ class PriceSelector:
     """Utility class for selecting appropriate prices based on order type."""
 
     @staticmethod
-    def get_execution_price(market_info: Dict[str, any], side: str, action: str) -> int:
+    def get_execution_price(market_info: Dict[str, Any], side: str, action: str) -> int:
         """
         Get the appropriate price for order execution.
 
@@ -130,7 +130,7 @@ class PriceSelector:
                 return base_price_cents
 
     @staticmethod
-    def get_mid_price(market_info: Dict[str, any], side: str) -> int:
+    def get_mid_price(market_info: Dict[str, Any], side: str) -> int:
         """
         Get mid price (average of bid and ask) for market analysis.
 
@@ -160,7 +160,7 @@ class PriceSelector:
             return PriceConverter.dollars_to_cents(base_price_dollars)
 
     @staticmethod
-    def get_spread(market_info: Dict[str, any], side: str) -> int:
+    def get_spread(market_info: Dict[str, Any], side: str) -> int:
         """
         Calculate bid-ask spread in cents.
 
@@ -184,7 +184,7 @@ class PriceSelector:
 
 
 def create_order_price(
-    market_info: Dict[str, any],
+    market_info: Dict[str, Any],
     position,
     buffer_cents: int = 1,
     max_price: int = 99
@@ -209,17 +209,11 @@ def create_order_price(
 
     # Add buffer for execution safety
     if action == "buy":
-        # For buying, we want slightly worse price (higher for YES, lower for NO)
-        if side == "yes":
-            buffered_price = execution_price + buffer_cents
-        else:
-            buffered_price = execution_price - buffer_cents  # Lower price for buying NO
+        # For buying, we want slightly HIGHER price to ensure fill (cross spread)
+        buffered_price = execution_price + buffer_cents
     else:
-        # For selling, we want slightly better price (higher for YES, lower for NO)
-        if side == "yes":
-            buffered_price = execution_price + buffer_cents  # Higher price for selling YES
-        else:
-            buffered_price = execution_price - buffer_cents  # Lower price for selling NO
+        # For selling, we want slightly LOWER price to ensure fill (cross spread)
+        buffered_price = execution_price - buffer_cents
 
     # Apply maximum price constraints
     if side == "yes":
