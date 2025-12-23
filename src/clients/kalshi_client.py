@@ -468,7 +468,18 @@ class KalshiClient(TradingLoggerMixin):
             no_price is not None
         ])
 
+        # 🔍 DEBUG: Log all parameters for diagnosis
+        self.logger.info(
+            f"🔍 place_order called: ticker={ticker}, side={side}, action={action}, "
+            f"count={count}, type_={type_}, yes_price={yes_price}, no_price={no_price}, "
+            f"expiration_ts={expiration_ts}, time_in_force={time_in_force}"
+        )
+
         if price_fields_provided > 1:
+            self.logger.error(
+                f"🚨 VALIDATION ERROR: Multiple price fields detected! "
+                f"yes_price={yes_price}, no_price={no_price}"
+            )
             raise KalshiAPIError(
                 f"Invalid order: Kalshi API requires exactly ONE price field. "
                 f"Received yes_price={yes_price}, no_price={no_price}. "
@@ -486,7 +497,10 @@ class KalshiClient(TradingLoggerMixin):
             if time_in_force == "ioc" and expiration_ts:
                 del order_data["expiration_ts"]
             order_data["time_in_force"] = time_in_force
-        
+
+        # 🔍 DEBUG: Log final order_data before API call
+        self.logger.info(f"🔍 Order payload: {order_data}")
+
         return await self._make_authenticated_request(
             "POST", "/trade-api/v2/portfolio/orders", json_data=order_data
         )
