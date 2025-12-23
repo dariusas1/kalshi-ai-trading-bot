@@ -33,7 +33,7 @@ class TradingConfig:
     # Position sizing and risk management - SNIPER MODE (Concentrated High Conviction)
     max_position_size_pct: float = 5.0  # INCREASED: Max 5% for high conviction
     max_daily_loss_pct: float = 8.0    # Max 8% daily loss limit
-    max_positions: int = 4              # REDUCED: Max 4 concurrent positions (Concentrated)
+    max_positions: int = 6              # INCREASED: Max 6 concurrent positions (was 4)
     min_balance: float = 25.0           # REDUCED: Lower minimum to trade more (was 100)
     live_trading_enabled: bool = field(default_factory=lambda: _env_flag("LIVE_TRADING_ENABLED", "false"))
     

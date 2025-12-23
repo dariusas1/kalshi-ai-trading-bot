@@ -320,7 +320,7 @@ class UnifiedAdvancedTradingSystem:
             # Step 1: Get ALL available markets (no time restrictions) - MORE PERMISSIVE VOLUME
             markets = await self.db_manager.get_eligible_markets(
             volume_min=settings.trading.min_volume_for_analysis,
-            max_days_to_expiry=365  # Accept any timeline with dynamic exits
+            max_days_to_expiry=getattr(settings.trading, 'max_time_to_expiry_days', 14)  # Use corrected setting name
         )
             if not markets:
                 self.logger.warning("❌ No markets available for trading - DATABASE EMPTY?")

@@ -65,6 +65,30 @@ async def execute_position(
         return False
 
     if live_mode:
+        # === PRODUCTION SAFETY: FRESH DATA CHECK ===
+        try:
+            fresh_market_data = await kalshi_client.get_market(position.market_id)
+            fresh_market_info = fresh_market_data.get("market", {})
+            
+            # Get current price against us (buying at ask)
+            if position.side.lower() == "yes":
+                current_price = (fresh_market_info.get("yes_ask") or 99) / 100
+            else:
+                current_price = (fresh_market_info.get("no_ask") or 99) / 100
+                
+            # Calculate fresh edge
+            if position.confidence:
+                fresh_edge = position.confidence - current_price
+                
+                logger.info(f"🔍 Fresh Edge Check: Confidence {position.confidence:.2f} - Price {current_price:.2f} = Edge {fresh_edge:.1%}")
+                
+                # Warn if edge has degraded significantly to negative
+                if fresh_edge < -0.02:  # Warning at -2%
+                    logger.warning(f"⚠️ NEGATIVE EDGE WARNING: Price moved against us! Fresh Edge: {fresh_edge:.1%}")
+                    # In strict mode we might return False here, but for now we proceed with warning
+        except Exception as e:
+            logger.warning(f"Could not perform fresh edge check: {e}")
+
         try:
             client_order_id = str(uuid.uuid4())
             
@@ -108,8 +132,16 @@ async def execute_position(
                 "type_": order_type
             }
             
-            # Only add price for LIMIT orders - market orders fill at best available
-            if order_type == "limit":
+            # Add price field for ALL orders (Kalshi API requires exactly one price field)
+            if order_type == "market":
+                # For market orders, set MAXIMUM price (99 cents) to ensure fill
+                # This acts as a "Buy at any price" (up to 99c)
+                if position.side.lower() == "yes":
+                    order_args["yes_price"] = 99
+                else:
+                    order_args["no_price"] = 99
+                logger.info(f"📝 Market order with MAX price: 99¢ for {position.side.upper()}")
+            else:  # limit order
                 buffer_cents = getattr(settings.trading, "market_order_price_buffer_cents", 2)
                 market_data = await kalshi_client.get_market(position.market_id)
                 market_info = market_data.get("market", {}) if market_data else {}
@@ -121,10 +153,8 @@ async def execute_position(
                     order_args["yes_price"] = order_price
                 else:
                     order_args["no_price"] = order_price
-                
+
                 logger.info(f"📝 Limit order price: {order_price}¢ for {position.side.upper()}")
-            
-            # Note: For market orders, we don't specify price - Kalshi fills at best available
 
             order_response = await kalshi_client.place_order(**order_args)
             order_info = order_response.get('order', {})
@@ -159,8 +189,8 @@ async def execute_position(
                 if use_limit_for_high_edge and order_status == 'resting':
                     logger.info(f"⚡ Limit order resting - will wait for fill or timeout...")
                 elif order_status == 'canceled':
-                    logger.info(f"⚠️ Order canceled (no fill) - retrying with true market order...")
-                    # Retry with TRUE market order (no price) as fallback
+                    logger.info(f"⚠️ Order canceled (no fill) - retrying with market order...")
+                    # Retry with market order as fallback
                     retry_order_id = str(uuid.uuid4())
                     retry_args = {
                         "ticker": position.market_id,
@@ -169,8 +199,12 @@ async def execute_position(
                         "action": "buy",
                         "count": position.quantity,
                         "type_": "market"
-                        # NO PRICE - true market order fills at best available
                     }
+                    # Kalshi API requires exactly one price field even for market orders
+                    if position.side.lower() == "yes":
+                        retry_args["yes_price"] = 99
+                    else:
+                        retry_args["no_price"] = 99
                     retry_response = await kalshi_client.place_order(**retry_args)
                     retry_info = retry_response.get('order', {})
                     if retry_info.get('status') in ['filled', 'executed']:
@@ -214,7 +248,7 @@ async def execute_position(
                 except Exception as cancel_err:
                     logger.warning(f"Could not cancel order: {cancel_err}")
                 
-                # Market order fallback (TRUE market order - no price)
+                # Market order fallback with minimum price
                 fallback_order_id = str(uuid.uuid4())
                 fallback_args = {
                     "ticker": position.market_id,
@@ -223,8 +257,12 @@ async def execute_position(
                     "action": "buy",
                     "count": position.quantity,
                     "type_": "market"
-                    # NO PRICE - true market order fills at best available
                 }
+                # Kalshi API requires exactly one price field even for market orders
+                if position.side.lower() == "yes":
+                    fallback_args["yes_price"] = 99
+                else:
+                    fallback_args["no_price"] = 99
                 fallback_response = await kalshi_client.place_order(**fallback_args)
                 fallback_info = fallback_response.get('order', {})
                 if fallback_info.get('status') in ['filled', 'executed']:

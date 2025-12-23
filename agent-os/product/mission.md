@@ -1,73 +1,188 @@
 # Product Mission
 
-## Pitch
+## Purpose
 
-Kalshi AI Trading Bot is a sophisticated algorithmic trading platform that helps quantitative traders and AI enthusiasts intelligently automate trading strategies on prediction markets by providing advanced AI-powered market analysis, portfolio optimization, and multi-strategy execution with comprehensive risk management.
+A personal automated trading system that connects to my Kalshi account and handles everything end-to-end: researching markets, placing bets, reacting to live events, and growing the portfolio exponentially with minimal intervention. Set it, forget it, watch it compound.
 
-## Users
+## Core Philosophy
 
-### Primary Customers
-- **Quantitative Traders**: Sophisticated traders seeking AI-enhanced market analysis and automated execution
-- **FinTech Professionals**: Technology professionals exploring AI applications in financial markets
-- **Educational Users**: Researchers and students studying algorithmic trading and AI applications
+### Quality Over Quantity
+- **NOT**: Analyzing 10,000+ markets, placing 50 x $3 bets spread thin
+- **YES**: Focusing on 5-15 high-conviction opportunities, placing $30-100 bets with smart hedging
 
-### User Personas
+### Event-Driven, Time-Sensitive Trading
+- **Primary Focus**: Events happening within 48 hours
+- **Exception**: Long-term snipes only when odds are massively mispriced (>20% edge)
+- **Live Adaptation**: React to in-game events, news, momentum shifts - like a human would
 
-**Alex Chen** (35-45 years old)
-- **Role:** Quantitative Analyst at a hedge fund
-- **Context:** Manages a personal trading account alongside professional responsibilities
-- **Pain Points:** Limited time for manual market analysis, difficulty scaling strategies across multiple markets, need for systematic risk management
-- **Goals:** Generate consistent alpha, leverage AI for market insights, automate routine trading operations
+### Automated Intelligence
+- Research markets automatically using AI + data APIs
+- Place and adjust bets without manual intervention
+- Hedge positions intelligently to lock in profits or minimize downside
+- Compound gains systematically
 
-**Sarah Rodriguez** (28-35 years old)
-- **Role:** Software Engineer with trading experience
-- **Context:** Passionate about AI and algorithmic trading, looking to apply technical skills to markets
-- **Pain Points:** Complex trading platforms lack AI integration, manual strategy testing is time-consuming, risk management is cumbersome
-- **Goals:** Learn practical AI trading applications, build automated trading income, understand market dynamics through data analysis
+## Trading Strategy
 
-**Michael Park** (40-55 years old)
-- **Role:** Independent Financial Researcher
-- **Context:** Researches prediction markets and trading strategies for academic and personal use
-- **Pain Points:** Limited access to professional trading tools, need for systematic backtesting, difficulty managing multiple strategies simultaneously
-- **Goals:** Develop and test trading hypotheses, access institutional-grade tools, contribute to trading research community
+### Market Selection Criteria
 
-## The Problem
+**Time Filters:**
+| Priority | Time to Event | Action |
+|----------|---------------|--------|
+| High | < 24 hours | Active trading, live adjustments |
+| Medium | 24-48 hours | Pre-position based on edge |
+| Low | 48+ hours | Only if edge > 20% (snipe opportunities) |
+| Skip | > 7 days | Ignore unless exceptional |
 
-### Fragmented AI Trading Solutions
-Current trading automation solutions either lack sophisticated AI integration or are prohibitively expensive and complex for individual traders. Most available tools force users to choose between manual trading with AI insights or fully automated systems without transparency, creating a significant gap in the market for intelligent, accessible trading automation.
+**Quality Filters:**
+- Focus on specific niches (sports, politics, economic data - pick 2-3)
+- Minimum liquidity threshold (avoid illiquid markets)
+- Minimum edge threshold (>5% estimated edge to enter)
+- Maximum 10-20 markets analyzed per cycle (not 10,000)
 
-**Our Solution:** We provide a unified platform that combines advanced AI reasoning (Grok-4), proven financial optimization techniques (Kelly Criterion), and multi-strategy execution with transparent decision-making and comprehensive risk controls.
+### Position Sizing
 
-## Differentiators
+**Concentrated, High-Conviction Bets:**
+| Confidence | Position Size | Example |
+|------------|---------------|---------|
+| Very High (>80%) | $50-100 | Strong statistical edge + AI confirmation |
+| High (70-80%) | $30-50 | Good edge, favorable odds |
+| Medium (60-70%) | $15-30 | Moderate edge, worth small position |
+| Below 60% | Skip | Not worth the risk |
 
-### AI-Powered Multi-Strategy Orchestration
-Unlike traditional trading bots that execute single, predetermined strategies or basic AI trading tools that focus solely on market predictions, we provide an intelligent orchestrator that combines market making, directional trading, and scalping strategies with AI-driven allocation optimization.
+### Hedging Strategy
 
-This results in more consistent performance across different market conditions and reduced risk through strategy diversification.
+**Smart Hedging for Consistent Wins:**
+- **Pre-game**: Position on most likely outcome based on research
+- **Live/In-game**: Hedge opposite side when odds shift favorably
+- **Goal**: Lock in guaranteed profit or minimize loss regardless of outcome
 
-### Institutional-Grade Portfolio Optimization
-While most retail trading tools use simple fixed position sizing, we implement sophisticated portfolio optimization using Kelly Criterion and risk parity allocation, previously available only to institutional quant firms.
+**Example:**
+```
+Pre-game: Buy YES on Team A at $0.45 ($50)
+In-game: Team A takes lead, YES now at $0.75
+Action: Buy NO at $0.25 ($30) to lock in profit
+Result: Guaranteed profit regardless of final outcome
+```
 
-This provides optimal position sizing based on edge confidence and systematic risk management, maximizing expected returns while controlling downside risk.
+### Live Event Adaptation
 
-### Real-Time AI Reasoning with Cost Controls
-Unlike solutions that either avoid AI integration due to cost concerns or provide uncapped AI usage without spending controls, we implement intelligent AI cost management with daily budgeting and model selection based on cost-benefit analysis.
+**React Like a Human Would:**
+- Monitor live events (scores, news, momentum)
+- Adjust positions when market hasn't caught up to reality
+- Exit early if thesis is invalidated
+- Double down if thesis is confirmed and odds still favorable
 
-This delivers the benefits of advanced AI analysis while maintaining predictable operational costs and sustainable long-term profitability.
+## Data & Research
 
-## Key Features
+### Primary Intelligence
 
-### Core Features
-- **AI-Powered Market Analysis**: Uses Grok-4 for real-time market evaluation and decision-making with role-based analysis framework
-- **Multi-Strategy Trading System**: Combines market making (30%), directional trading (40%), and quick flip scalping (30%) for diversified performance
-- **Portfolio Optimization**: Kelly Criterion implementation with risk parity allocation and dynamic rebalancing based on market conditions
+**AI Analysis (Grok-4.1 + OpenAI fallback):**
+- Market probability estimation
+- Edge calculation vs. current odds
+- Confidence scoring
+- News/sentiment integration
 
-### Risk Management Features
-- **Comprehensive Risk Controls**: Daily loss limits, position size limits, trailing stop losses, and real-time position monitoring
-- **Dynamic Position Sizing**: Volatility-adjusted position sizing with inventory management and exposure controls
-- **Real-Time Monitoring**: Live dashboard with P&L tracking, position overview, and performance analytics
+**Statistical Data (Valyu.ai or similar):**
+- Historical performance data
+- Real-time stats and updates
+- Event-specific metrics
+- Odds movement tracking
 
-### User Experience Features
-- **Intuitive Dashboard**: Streamlit-based monitoring interface with auto-refresh capabilities and visual performance metrics
-- **Flexible Configuration**: Granular control over strategy allocations, risk parameters, and AI model selection
-- **Educational Transparency**: Detailed logging of AI decisions and strategy performance for learning and optimization
+### Research Flow
+```
+1. Filter: Only markets < 48hrs (or exceptional snipes)
+2. Narrow: Apply niche/category filters (e.g., NBA, NFL, specific politics)
+3. Analyze: AI + data analysis on 10-20 candidates max
+4. Score: Rank by edge, confidence, liquidity
+5. Select: Top 3-5 opportunities per cycle
+6. Size: Position based on confidence tier
+7. Hedge: Plan hedge points before entry
+8. Monitor: Live adjustments during event
+9. Exit: Take profits or cut losses systematically
+```
+
+## Technical Architecture
+
+### Core Components
+
+**Market Selection Engine:**
+- Filters 60K+ markets down to 10-20 candidates
+- Applies time, liquidity, category, and edge filters
+- Runs every 15-30 minutes
+
+**AI Analysis Pipeline:**
+- Analyzes only filtered candidates (not entire market)
+- Estimates true probability vs. market odds
+- Calculates edge and confidence
+- Cost: ~$0.005/analysis × 20 markets = $0.10/cycle
+
+**Position Manager:**
+- Tracks all open positions
+- Monitors for hedge opportunities
+- Executes live adjustments
+- Enforces risk limits
+
+**Live Event Monitor:**
+- Watches active events for material changes
+- Triggers re-analysis when significant news/score changes
+- Executes hedges or exits automatically
+
+### Data Sources
+
+| Source | Purpose | Priority |
+|--------|---------|----------|
+| Kalshi API | Market data, order execution | Required |
+| Grok-4.1 (xAI) | AI analysis, probability estimation | Primary |
+| OpenAI | Fallback AI | Secondary |
+| Valyu.ai | Statistical data, historical performance | Recommended |
+| News APIs | Real-time news for live events | Optional |
+
+## Risk Management
+
+### Position Limits
+- Max single position: 10-15% of portfolio
+- Max correlated positions: 25% of portfolio
+- Max total exposure: 60% of portfolio (keep cash for opportunities)
+
+### Loss Limits
+- Daily loss limit: 10% of portfolio
+- Weekly loss limit: 20% of portfolio
+- Single trade max loss: 5% of portfolio
+
+### Hedging Rules
+- Always have hedge plan before entry
+- Execute hedge when profit lock-in available
+- Never let winning position become big loser
+
+## Success Metrics
+
+### Primary Goal
+Exponential portfolio growth through consistent, high-conviction trades with smart hedging.
+
+### Key Metrics
+| Metric | Target |
+|--------|--------|
+| Win Rate | >60% |
+| Average Win/Loss Ratio | >1.5x |
+| Daily AI Cost | <$1 |
+| Markets Analyzed/Day | 20-50 (not 10,000) |
+| Positions/Day | 3-10 |
+| Monthly ROI | >15% |
+
+## What This Is NOT
+
+- ❌ Not a spray-and-pray system betting on everything
+- ❌ Not a long-term holder (except rare snipes)
+- ❌ Not analyzing 10,000 markets and burning AI credits
+- ❌ Not placing $3 bets spread across 50 markets
+- ❌ Not requiring constant manual monitoring
+
+## What This IS
+
+- ✅ A focused, high-conviction trading system
+- ✅ Event-driven with <48hr time horizon
+- ✅ Live-adaptive like a human trader
+- ✅ Smart hedging for consistent profits
+- ✅ Quality over quantity (fewer, bigger bets)
+- ✅ Fully automated set-and-forget
+- ✅ Optimized for capital growth and compounding

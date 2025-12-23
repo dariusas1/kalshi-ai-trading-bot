@@ -160,10 +160,11 @@ class AdvancedPortfolioOptimizer:
         # Limit opportunities to prevent optimization complexity
         max_opportunities = getattr(settings.trading, 'max_opportunities_per_batch', 50)
         if len(opportunities) > max_opportunities:
-            # Sort by confidence * expected_return and take top N
+            # Sort by confidence * expected_return * time_urgency (Recency Boost)
+            # This prioritizes markets closing soon (e.g. < 2 days) over those closing in 2 weeks
             opportunities = sorted(
                 opportunities,
-                key=lambda x: x.confidence * x.expected_return,
+                key=lambda x: x.confidence * x.expected_return * (1 + 1.0/max(0.1, x.time_to_expiry)),
                 reverse=True
             )[:max_opportunities]
             self.logger.info(f"Limited to top {max_opportunities} opportunities for optimization")
