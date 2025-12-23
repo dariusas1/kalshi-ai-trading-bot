@@ -37,13 +37,13 @@ class TradingConfig:
     min_balance: float = 25.0           # REDUCED: Lower minimum to trade more (was 100)
     live_trading_enabled: bool = field(default_factory=lambda: _env_flag("LIVE_TRADING_ENABLED", "false"))
     
-    # Market filtering criteria - STRICT TIME LIMITS
-    min_volume: float = 750.0            # Minimum volume to consider market
-    max_time_to_expiry_days: int = 1     # STRICT: Only trade markets expiring within 24 hours
-    max_market_expiry_hours: int = 24    # NEW: Maximum market expiry in hours for clarity
+    # Market filtering criteria - RELAXED TIME LIMITS
+    min_volume: float = 500.0            # FIXED: Lower volume requirement (was 750, now 500)
+    max_time_to_expiry_days: int = 7     # FIXED: Allow markets expiring within 7 days (was 1 day)
+    max_market_expiry_hours: int = 168   # FIXED: 7 days in hours (was 24 hours)
     
-    # AI decision making - SNIPER MODE (High Conviction)
-    min_confidence_to_trade: float = 0.65   # INCREASED: 65% minimum AI confidence to trade (Sniper Mode)
+    # AI decision making - MORE PERMISSIVE (Enable More Trading)
+    min_confidence_to_trade: float = 0.50   # FIXED: 50% minimum AI confidence to trade (matches edge_filter.py)
     scan_interval_seconds: int = 300      # INCREASED: Scan markets every 5 minutes (300s) to avoid rate limits
     
     # AI model configuration
@@ -99,9 +99,9 @@ class TradingConfig:
     trailing_stop_distance_pct: float = 0.05  # 5% trailing distance
     trailing_stop_activation_pct: float = 0.03 # Activate trailing stop after 3% profit
 
-    # AI trading criteria - SNIPER MODE
+    # AI trading criteria - MORE PERMISSIVE
     max_analysis_cost_per_decision: float = 0.05  # REDUCED: $0.05 max per-decision cost (Efficient usage)
-    min_confidence_threshold: float = 0.65  # INCREASED: Higher confidence threshold (sync with min_confidence_to_trade)
+    min_confidence_threshold: float = 0.50  # FIXED: Lower confidence threshold (sync with min_confidence_to_trade)
 
     # Cost control and market analysis frequency - SNIPER MODE
     daily_ai_budget: float = 3.50  # REDUCED: $3.50 daily AI budget (Target <$5)
@@ -114,8 +114,8 @@ class TradingConfig:
     enable_daily_cost_limiting: bool = True  # Enable daily cost limits
     sleep_when_limit_reached: bool = True  # Sleep until next day when limit reached
 
-    # Enhanced market filtering to reduce analyses - SNIPER MODE
-    min_volume_for_analysis: float = 1000.0  # INCREASED: Only analyze liquid markets ($1000+)
+    # Enhanced market filtering to reduce analyses - MORE PERMISSIVE
+    min_volume_for_analysis: float = 500.0   # FIXED: Lower volume requirement for analysis (was 1000, now 500)
     skip_news_for_low_volume: bool = True
     news_search_volume_threshold: float = 2500.0 # INCREASED: Only search news for very active markets
     exclude_low_liquidity_categories: List[str] = field(default_factory=lambda: [
@@ -178,8 +178,8 @@ class TradingConfig:
     max_correlation: float = 0.95
     max_drawdown: float = 0.50
     max_sector_exposure: float = 0.90
-    min_trade_edge: float = 0.08 # INCREASED: Require 8% edge
-    min_confidence_for_large_size: float = 0.65 # INCREASED: Sync with min_confidence
+    min_trade_edge: float = 0.05 # FIXED: Lower edge requirement (5% to match edge_filter.py MIN_EDGE_REQUIREMENT)
+    min_confidence_for_large_size: float = 0.50 # FIXED: Lower confidence requirement (50%)
     max_reduction_per_cycle: float = 0.30
     min_position_value: float = 5.0
     rebalance_threshold: float = 0.10

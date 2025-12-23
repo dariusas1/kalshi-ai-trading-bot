@@ -68,43 +68,43 @@ class EdgeFilter:
     ) -> EdgeFilterResult:
         """
         Calculate edge and determine if it meets filtering criteria.
-        
+
         Args:
             ai_probability: AI predicted probability (0.0 to 1.0)
             market_probability: Current market price/probability (0.0 to 1.0)
             confidence: AI confidence level (0.0 to 1.0)
-            
+
         Returns:
             EdgeFilterResult with filtering decision and details
         """
-        
+
         # Validate inputs
         ai_probability = max(0.01, min(0.99, ai_probability))
         market_probability = max(0.01, min(0.99, market_probability))
         confidence = confidence or 0.7
-        
+
         # Calculate raw edge (probability difference)
         edge_magnitude = ai_probability - market_probability
         edge_percentage = abs(edge_magnitude)
-        
+
         # ⚖️ BIAS CORRECTION: LLMs can be overly negative/conservative
-        # Penalize NO edges to ensure we only take really strong NO positions
+        # REDUCED PENALTY: 10% penalty for NO edges (was 20%) to allow more trading
         if edge_magnitude < 0:
-            edge_percentage *= 0.8  # 20% penalty for NO bets (requires stronger signal)
-        
+            edge_percentage *= 0.9  # 10% penalty for NO bets (reduced from 20%)
+
         # Determine position side based on edge direction
         if edge_magnitude > 0:
             side = "YES"  # AI thinks YES is underpriced
         else:
             side = "NO"   # AI thinks NO is underpriced (YES is overpriced)
-        
+
         # Confidence-adjusted edge thresholds
         if confidence >= 0.8:
-            required_edge = cls.HIGH_CONFIDENCE_EDGE     # 8% for high confidence
+            required_edge = cls.HIGH_CONFIDENCE_EDGE     # 4% for high confidence
         elif confidence >= 0.6:
-            required_edge = cls.MEDIUM_CONFIDENCE_EDGE   # 10% for medium confidence
+            required_edge = cls.MEDIUM_CONFIDENCE_EDGE   # 6% for medium confidence
         else:
-            required_edge = cls.LOW_CONFIDENCE_EDGE      # 15% for low confidence
+            required_edge = cls.LOW_CONFIDENCE_EDGE      # 10% for low confidence
 
         # Settings-driven overrides
         try:
@@ -112,27 +112,42 @@ class EdgeFilter:
             min_confidence = getattr(settings.trading, "min_confidence_threshold", cls.MIN_CONFIDENCE_FOR_TRADE)
             min_edge = getattr(settings.trading, "min_trade_edge", cls.MIN_EDGE_REQUIREMENT)
             required_edge = max(required_edge, min_edge)
+            # 🚨 DIAGNOSTIC: Log settings override
+            if min_edge > cls.MIN_EDGE_REQUIREMENT:
+                _logger.debug(f"Settings override: using min_edge={min_edge:.1%} (class default: {cls.MIN_EDGE_REQUIREMENT:.1%})")
         except Exception:
             min_confidence = cls.MIN_CONFIDENCE_FOR_TRADE
-        
+
         # Calculate confidence-adjusted edge
         confidence_adjusted_edge = edge_percentage * confidence
-        
+
         # Check if edge meets requirements (use > instead of >= to avoid floating point precision issues)
         passes_basic_edge = edge_percentage > (required_edge - 0.001)  # Allow tiny tolerance for floating point
         passes_confidence = confidence >= min_confidence
-        
+
+        # 🚨 ENHANCED DIAGNOSTIC LOGGING
+        _logger.info(
+            f"🔍 EDGE CALCULATION: "
+            f"AI={ai_probability:.1%}, Market={market_probability:.1%}, "
+            f"Raw Edge={abs(edge_magnitude):.1%}, "
+            f"Adjusted Edge={edge_percentage:.1%} ({side}), "
+            f"Confidence={confidence:.1%}, "
+            f"Required Edge={required_edge:.1%}, "
+            f"Min Confidence={min_confidence:.1%}, "
+            f"Passes Edge={passes_basic_edge}, Passes Confidence={passes_confidence}"
+        )
+
         # Generate filtering decision and reason
         if not passes_confidence:
             passes_filter = False
-            reason = f"Confidence {confidence:.1%} below minimum {cls.MIN_CONFIDENCE_FOR_TRADE:.1%}"
+            reason = f"Confidence {confidence:.1%} below minimum {min_confidence:.1%}"
         elif not passes_basic_edge:
             passes_filter = False
             reason = f"Edge {edge_percentage:.1%} below required {required_edge:.1%} for confidence {confidence:.1%}"
         else:
             passes_filter = True
             reason = f"Meets requirements: {edge_percentage:.1%} edge, {confidence:.1%} confidence"
-        
+
         # Update stats tracking
         if passes_filter:
             _filter_stats['passed'] += 1

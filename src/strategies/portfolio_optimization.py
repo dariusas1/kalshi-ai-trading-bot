@@ -1288,6 +1288,14 @@ async def create_market_opportunities_from_markets(
             logger.error(f"Error creating opportunity from {market.market_id}: {e}")
             continue
 
+    # 🚨 ENHANCED DIAGNOSTIC: Filtering funnel summary
+    logger.info(
+        f"📊 OPPORTUNITY CREATION SUMMARY: "
+        f"Input Markets={len(markets)}, "
+        f"Passed Edge Filter={len(opportunities)}, "
+        f"Pass Rate={len(opportunities)/len(markets)*100:.1f}%"
+    )
+
     logger.info(f"Created {len(opportunities)} opportunities from {len(markets)} markets")
     return opportunities
 
