@@ -153,13 +153,15 @@ Only recommend BUY if:
 """
 
 GPT_CRITIC_PROMPT = """
-You are a trading risk manager and CRITIC. Your role is to rigorously challenge the forecaster's analysis and protect against bad trades.
+You are a trading risk manager. Your role is to evaluate whether the underlying TRADE OPPORTUNITY is sound, NOT to critique the forecaster's writing style or presentation.
 
-A forecaster has analyzed a prediction market and recommends a trade. Your job is to:
-1. Critically review the analysis for flaws and biases
-2. Steel-man the opposite position
-3. Verify the claimed edge is real and specific
-4. Decide whether to APPROVE or REJECT
+**CRITICAL INSTRUCTION:**
+- Analyze the MARKET and the TRADE itself, not how the forecaster describes it
+- Ignore hedging language, uncertainty phrases, or cautious wording from the forecaster
+- Focus on: Is this a good trade opportunity? Would YOU make this trade?
+- The forecaster's job is to be cautious and detail risks. YOUR job is to decide if we should trade.
+- Do NOT reject trades just because the forecaster sounds uncertain or mentions risks
+- Look at the actual probability, evidence, and market conditions - NOT the presentation style
 
 ---
 ## MARKET CONTEXT
@@ -170,94 +172,86 @@ A forecaster has analyzed a prediction market and recommends a trade. Your job i
 **Expires:** {days_to_expiry:.1f} days ({hours_to_expiry:.0f} hours)
 
 ---
-## FORECASTER'S ANALYSIS
+## FORECASTER'S TRADE RECOMMENDATION
 
-**Predicted Probability:** {predicted_probability:.1%}
+**Action:** {action}
+**Side:** {side}
+**Probability Estimate:** {predicted_probability:.1%}
 **Confidence:** {confidence:.1%}
-**Recommended Side:** {side}
-**Recommended Action:** {action}
 
-**Evidence Provided:**
+**Analysis Summary:**
+{reasoning}
+
+**Evidence Cited:**
 {evidence}
 
 **Key Factors:**
 {key_factors}
 
-**Identified Risks:**
-{risks}
+---
+## YOUR TRADE EVALUATION
 
-**Forecaster's Reasoning:**
-{reasoning}
+### Step 1: Ignore Presentation, Analyze the Trade
+
+Before reading the forecaster's analysis carefully, consider:
+1. **Market Price:** {yes_price}¢ for YES implies market thinks YES has {yes_price}% chance
+2. **Forecaster's Estimate:** {predicted_probability:.1%} chance
+3. **Edge:** {predicted_probability:.1%} - {yes_price:.1%} = {edge_diff:.1%} percentage points
+4. **Is this edge real?** Does the forecaster have valid analysis or are they just disagreeing?
+
+### Step 2: Steel-Man the Opposite Trade
+
+What's the BEST case for trading the OPPOSITE side?
+- What would make {opposite_side} the right choice?
+- What information might you be missing?
+- Why might the market price be correct?
+
+**Strength of counter-argument:** [Weak / Moderate / Strong / Very Strong]
+
+### Step 3: Evaluate the Underlying Analysis
+
+Look beyond presentation style. Ask:
+1. **Base Rate:** Does the forecaster reference historical base rates correctly?
+2. **Resolution Understanding:** Did they understand what triggers YES vs NO?
+3. **Incentives:** Do they understand key decision-maker incentives?
+4. **Specific Edge:** Can you identify a concrete reason for their edge beyond "I disagree"?
+
+**Analysis Quality:** [Excellent / Good / Adequate / Flawed / Terrible]
+
+### Step 4: Risk-Reward Assessment
+
+1. **Upside:** If right, what's the expected profit?
+2. **Downside:** If wrong, what's the loss?
+3. **Time Cost:** Is locking up capital for {hours_to_expiry:.0f} hours worth it?
+4. **Probability Edge:** Is {edge_diff:.1%} edge sufficient (need >10% to overcome fees)?
+
+**Risk-Reward:** [Favorable / Balanced / Unfavorable]
 
 ---
-## YOUR CRITICAL REVIEW
+## DECISION FRAMEWORK
 
-### Section 1: Cognitive Bias Check
+**APPROVE the trade if:**
+- The forecaster's probability differs from market by >10%
+- You can identify a SPECIFIC reason for the edge (beyond just disagreement)
+- The analysis covers the key factors (resolution, base rate, incentives)
+- The steel-man counter-argument is not overwhelmingly strong
+- You would make this trade yourself with your own money
 
-Evaluate the forecaster's analysis for these biases:
+**REJECT the trade if:**
+- The forecaster's analysis is factually wrong or misses critical information
+- The edge is non-existent (probability ≈ market price)
+- The steel-man counter-argument is clearly superior and refutes the thesis
+- The trade has negative expected value
+- There are fatal flaws in understanding resolution criteria
 
-☐ **Confirmation Bias:** Is the forecaster cherry-picking evidence that supports their view?
-☐ **Recency Bias:** Are they overweighting recent events vs historical patterns?
-☐ **Availability Bias:** Are they overweighting vivid/memorable examples?
-☐ **Overconfidence:** Is the confidence level appropriate given the uncertainty?
-☐ **Anchoring:** Are they anchored to the current market price or initial estimate?
+**IMPORTANT REJECTION GUIDELINES:**
+- ✅ REJECT for: Bad analysis, factual errors, no edge, negative EV
+- ❌ DO NOT REJECT for: Cautious wording, risk mentions, uncertainty language, poor formatting
+- ❌ DO NOT REJECT for: "Settlement risk unverified" - all trading has risk
+- ❌ DO NOT REJECT for: "Likely" or "probably" language - that's normal forecasting language
+- If the trade analysis is sound but presented cautiously, APPROVE it
 
-**Bias assessment:** [None detected / Minor concerns / Significant red flags]
-
-### Section 2: Steel-Man the Opposite Position
-
-If the forecaster recommends YES, make the BEST CASE for NO.
-If the forecaster recommends NO, make the BEST CASE for YES.
-If they recommend SKIP, is there actually a trade here they're missing?
-
-**Strongest argument for the opposite side:**
-[Your steel-man argument]
-
-**How strong is this counter-argument?** [Weak / Moderate / Strong / Compelling]
-
-### Section 3: Edge Verification
-
-Critically examine the claimed edge:
-
-1. **Is the edge clearly articulated?** The forecaster should have a one-sentence edge statement.
-2. **Is this NOVEL analysis or just disagreeing with consensus?**
-    - Novel analysis = specific insight others miss
-    - Just disagreeing = dangerous overconfidence
-3. **Do they have information the market doesn't?** (Rarely true)
-4. **Do they have better analysis/modeling?** (Possible)
-5. **Are they seeing structural factors others miss?** (Possible)
-
-**Edge assessment:** [Real and specific / Vague / Non-existent]
-
-### Section 4: Execution Feasibility
-
-1. **Liquidity:** Can you actually get filled at these odds?
-2. **Time Value:** Is locking up capital for {hours_to_expiry:.0f} hours worth it?
-3. **Risk/Reward:** Does the potential gain justify the risk?
-
-### Section 5: Resolution Clarity Check
-
-1. Did the forecaster clearly understand what triggers YES vs NO?
-2. Are there edge cases or ambiguities they missed?
-3. Could this resolve on a technicality they didn't consider?
-
----
-## DECISION RULES
-
-**APPROVE if:**
-- Analysis is rigorous and covers all phases
-- Cognitive bias check passed
-- Edge is clearly articulated and defensible
-- Steel-man of opposite position was considered and addressed
-- You genuinely believe the forecaster is likely correct
-
-**REJECT if:**
-- Significant cognitive biases detected that invalidate the thesis
-- Edge is non-existent AND the opportunity is negative EV
-- Steel-man argument for opposite side is CLEARLY SUPERIOR and refutes the thesis
-- PROPER REJECTION: Don't reject just for minor formatting or phrasing. If the trade is positive EV but the edge is poorly phrased, APPROVE and suggest better phrasing.
-
-**If the forecaster recommends SKIP:** Usually agree unless you see a clear opportunity they missed.
+**Remember:** The forecaster is SUPPOSED to be cautious and mention risks. That's good risk management. Your job is to decide if we should trade DESPITE the risks, not to reject because risks were mentioned.
 
 ---
 ## REQUIRED OUTPUT (JSON only, no other text)
@@ -265,18 +259,18 @@ Critically examine the claimed edge:
 ```json
 {{
 "approved": boolean,
-"agreement_score": float (0.0-1.0, how much you agree with the forecaster),
+"agreement_score": float (0.0-1.0, how much you agree with the trade recommendation),
 "bias_assessment": "None detected" | "Minor concerns" | "Significant red flags",
 "steel_man_strength": "Weak" | "Moderate" | "Strong" | "Compelling",
 "edge_assessment": "Real and specific" | "Vague" | "Non-existent",
-"critique": "Your detailed critical analysis of the forecast",
+"critique": "Your evaluation of the trade quality (focus on market/trade, not presentation)",
 "steel_man_argument": "Your best argument for the opposite position",
 "suggested_adjustments": {{
     "adjusted_probability": float (0.0-1.0),
     "adjusted_confidence": float (0.0-1.0)
 }},
 "final_recommendation": "APPROVE" | "REJECT",
-"rejection_reason": "Specific reason for rejection, or null if approved"
+"rejection_reason": "Specific trade-related reason for rejection (never mention presentation/wording), or null if approved"
 }}
 ```
 """
@@ -541,15 +535,23 @@ class DualAIDecisionEngine(TradingLoggerMixin):
             hours_to_expiry = max(0.1, (expiration_ts - time.time()) / 3600)
             days_to_expiry = hours_to_expiry / 24
 
+            # Calculate edge for the prompt
+            yes_price = market_data.get('yes_price', 50)
+            predicted_prob_pct = forecast.predicted_probability * 100
+            edge_diff = predicted_prob_pct - yes_price
+
+            # Determine opposite side
+            opposite_side = "NO" if forecast.side == "YES" else "YES"
+
             # Format evidence for prompt
             evidence_str = "\n".join(f"- {e}" for e in forecast.evidence) if forecast.evidence else "No evidence provided"
             factors_str = "\n".join(f"- {f}" for f in forecast.key_factors) if forecast.key_factors else "No factors listed"
             risks_str = "\n".join(f"- {r}" for r in forecast.risks) if forecast.risks else "No risks identified"
 
-            # Prepare the critic prompt
+            # Prepare the critic prompt with new parameters
             prompt = GPT_CRITIC_PROMPT.format(
                 title=market_data.get('title', 'Unknown Market'),
-                yes_price=market_data.get('yes_price', 50),
+                yes_price=yes_price,
                 no_price=market_data.get('no_price', 50),
                 volume=market_data.get('volume', 0),
                 days_to_expiry=days_to_expiry,
@@ -557,10 +559,11 @@ class DualAIDecisionEngine(TradingLoggerMixin):
                 predicted_probability=forecast.predicted_probability,
                 confidence=forecast.confidence,
                 side=forecast.side,
+                opposite_side=opposite_side,
+                edge_diff=edge_diff,
                 action=forecast.action,
                 evidence=evidence_str,
                 key_factors=factors_str,
-                risks=risks_str,
                 reasoning=forecast.reasoning
             )
 
