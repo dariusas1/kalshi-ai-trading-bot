@@ -38,9 +38,9 @@ class TradingConfig:
     live_trading_enabled: bool = field(default_factory=lambda: _env_flag("LIVE_TRADING_ENABLED", "false"))
     
     # Market filtering criteria - RELAXED TIME LIMITS
-    min_volume: float = 500.0            # FIXED: Lower volume requirement (was 750, now 500)
-    max_time_to_expiry_days: int = 7     # FIXED: Allow markets expiring within 7 days (was 1 day)
-    max_market_expiry_hours: int = 168   # FIXED: 7 days in hours (was 24 hours)
+    min_volume: float = 200.0            # FIXED: Lower volume requirement for more opportunities
+    max_time_to_expiry_days: int = 14    # FIXED: Allow markets expiring within 14 days (was 7 days)
+    max_market_expiry_hours: int = 336   # FIXED: 14 days in hours (was 168 hours)
     
     # AI decision making - MORE PERMISSIVE (Enable More Trading)
     min_confidence_to_trade: float = 0.50   # FIXED: 50% minimum AI confidence to trade (matches edge_filter.py)
@@ -70,11 +70,11 @@ class TradingConfig:
     expected_slippage: float = 0.005       # Slippage haircut on edge/returns
     high_volatility_kelly_cap: float = 0.5  # Cap Kelly fraction in high-volatility regimes
 
-    # Trading frequency - SNIPER MODE (Slower, More Deliberate)
+    # Trading frequency - ACTIVE MODE (More Frequent Trading)
     market_scan_interval: int = 300      # 300 second scan interval
     position_check_interval: int = 60       # Check positions every 60 seconds
-    max_trades_per_hour: int = 4           # Max 4 trades per hour
-    run_interval_minutes: int = 30          # INCREASED: Run less frequently (30m) to save costs/rates
+    max_trades_per_hour: int = 15          # INCREASED: Max 15 trades per hour (was 4)
+    run_interval_minutes: int = 5          # DECREASED: Run every 5 minutes instead of 30 (was 30)
     num_processor_workers: int = 5      # Number of concurrent market processor workers
     
     # Strategy allocations (should sum to 1.0)
@@ -103,19 +103,19 @@ class TradingConfig:
     max_analysis_cost_per_decision: float = 0.05  # REDUCED: $0.05 max per-decision cost (Efficient usage)
     min_confidence_threshold: float = 0.50  # FIXED: Lower confidence threshold (sync with min_confidence_to_trade)
 
-    # Cost control and market analysis frequency - SNIPER MODE
-    daily_ai_budget: float = 3.50  # REDUCED: $3.50 daily AI budget (Target <$5)
-    max_ai_cost_per_decision: float = 0.05  # REDUCED: Sync with above
-    analysis_cooldown_hours: int = 12  # INCREASED: 12 hour cooldown (Analyze once per day)
-    max_analyses_per_market_per_day: int = 1  # REDUCED: Max 1 analysis per market per day (One Shot)
-    
+    # Cost control and market analysis frequency - ACTIVE MODE
+    daily_ai_budget: float = 15.00  # INCREASED: $15 daily AI budget to allow more trading (was $3.50)
+    max_ai_cost_per_decision: float = 0.10  # INCREASED: Allow more per-decision spending (was $0.05)
+    analysis_cooldown_hours: int = 2  # DECREASED: 2 hour cooldown (was 12 hours)
+    max_analyses_per_market_per_day: int = 5  # INCREASED: Max 5 analyses per market per day (was 1)
+
     # Daily AI spending limits - SAFETY CONTROLS
-    daily_ai_cost_limit: float = 4.50  # REDUCED: Hard cap at $4.50/day
+    daily_ai_cost_limit: float = 20.00  # INCREASED: Hard cap at $20/day (was $4.50)
     enable_daily_cost_limiting: bool = True  # Enable daily cost limits
     sleep_when_limit_reached: bool = True  # Sleep until next day when limit reached
 
     # Enhanced market filtering to reduce analyses - MORE PERMISSIVE
-    min_volume_for_analysis: float = 500.0   # FIXED: Lower volume requirement for analysis (was 1000, now 500)
+    min_volume_for_analysis: float = 200.0   # FIXED: Lower volume requirement for analysis (was 500, now 200)
     skip_news_for_low_volume: bool = True
     news_search_volume_threshold: float = 2500.0 # INCREASED: Only search news for very active markets
     exclude_low_liquidity_categories: List[str] = field(default_factory=lambda: [
@@ -162,7 +162,7 @@ class TradingConfig:
     max_concurrent_markets: int = 10
 
     # === MARKET SELECTION (ADVANCED) ===
-    min_volume_for_analysis: float = 1000.0 # Sync with above
+    min_volume_for_analysis: float = 200.0 # Sync with above (lowered from 1000)
     min_volume_for_market_making: float = 2000.0 # INCREASED: Safer market making
     min_price_movement: float = 0.0     # DISABLED: Allow 50/50 markets (was 0.02)
     min_confidence_long_term: float = 0.45
@@ -347,20 +347,19 @@ order_refresh_minutes: int = 15         # Refresh orders every 15 minutes
 max_orders_per_market: int = 4          # Maximum orders per market (2 each side)
 
 # === MARKET SELECTION (ENHANCED FOR MORE OPPORTUNITIES) ===
-# Removed time restrictions - trade ANY deadline with dynamic exits!
-# max_time_to_expiry_days: REMOVED      # No longer used - trade any timeline!
-min_volume_for_analysis: float = 200.0  # DECREASED: Much lower minimum volume (was 1000, now 200)
-min_volume_for_market_making: float = 500.0  # DECREASED: Lower volume for market making (was 2000, now 500)
-min_price_movement: float = 0.0        # DISABLED: Allow 50/50 markets (was 2%)
-max_bid_ask_spread: float = 0.15        # INCREASED: Allow wider spreads (was 0.10, now 15¢)
-min_confidence_long_term: float = 0.45  # DECREASED: Lower confidence for distant expiries (was 0.65, now 45%)
+# Trade up to 14 days out with dynamic exits!
+min_volume_for_analysis: float = 200.0  # Lower minimum volume for more opportunities
+min_volume_for_market_making: float = 500.0  # Lower volume for market making
+min_price_movement: float = 0.0        # DISABLED: Allow 50/50 markets
+max_bid_ask_spread: float = 0.15        # Allow wider spreads
+min_confidence_long_term: float = 0.45  # Lower confidence for distant expiries
 
-# === COST OPTIMIZATION (SNIPER MODE) ===
-# Enhanced cost controls for the beast mode system
-daily_ai_budget: float = 3.50           # REDUCED: Sniper mode budget
-max_ai_cost_per_decision: float = 0.05  # REDUCED: Efficient usage
-analysis_cooldown_hours: int = 12        # INCREASED: Analyze once per day
-max_analyses_per_market_per_day: int = 1 # REDUCED: One shot per day
+# === COST OPTIMIZATION (ACTIVE MODE) ===
+# Enhanced cost controls for more trading
+daily_ai_budget: float = 15.00          # INCREASED: More budget for trading (was $3.50)
+max_ai_cost_per_decision: float = 0.10  # INCREASED: Allow more per-decision spending
+analysis_cooldown_hours: int = 2        # DECREASED: 2 hour cooldown (was 12)
+max_analyses_per_market_per_day: int = 5 # INCREASED: Up to 5 analyses per market per day
 skip_news_for_low_volume: bool = True   # Skip expensive searches for low volume
 news_search_volume_threshold: float = 2500.0  # News threshold
 
