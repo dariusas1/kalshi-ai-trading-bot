@@ -460,7 +460,21 @@ class KalshiClient(TradingLoggerMixin):
             "count": count,
             "type": type_
         }
-        
+
+        # 🚨 CRITICAL: Kalshi API requires exactly ONE price field
+        # Validate that only one price field is provided
+        price_fields_provided = sum([
+            yes_price is not None,
+            no_price is not None
+        ])
+
+        if price_fields_provided > 1:
+            raise KalshiAPIError(
+                f"Invalid order: Kalshi API requires exactly ONE price field. "
+                f"Received yes_price={yes_price}, no_price={no_price}. "
+                f"Please provide only one of these parameters."
+            )
+
         if yes_price is not None:
             order_data["yes_price"] = yes_price
         if no_price is not None:
